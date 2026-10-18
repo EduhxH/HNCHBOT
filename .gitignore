@@ -1,0 +1,10 @@
+.venv/
+.env
+dados/
+__pycache__/
+*.pyc
+.claude/
+
+# os PDFs não vão para o repositório (copia-os para documentos/)
+documentos/*
+!documentos/.gitkeep
