@@ -1,50 +1,64 @@
-# ⚛️ Assistente de Físico-Química — chatbot para vários PDFs
+# 📚 Assistente de documentos — chatbot para PDFs com a Groq
 
-Demo de um chatbot que **só responde com base nos PDFs** que estão na pasta `documentos/`.
-Serve para encontrar rapidamente uma parte específica de um documento, por exemplo:
+Demo de um chatbot que **só responde com base nos PDFs** da pasta `documentos/`, feito para
+consultar o **Regulamento Interno** e o **Projeto Educativo** do Agrupamento de Escolas Henriques Nogueira
+(funciona com outros PDFs). Exemplos de perguntas:
 
-- *"O que diz a Lei de Lavoisier?"*
-- *"O que significa o 2.º parágrafo da página 3 do documento Movimentos e Forças?"*
-- *"Em que documento se fala de indicadores ácido-base?"*
-- *"E na página seguinte?"* (percebe perguntas de seguimento)
+- *"Quantas faltas injustificadas pode dar um aluno do 1.º ciclo?"*
+- *"O que diz o artigo 120.º?"* → e a seguir *"E o artigo seguinte?"*
+- *"Quais são as metas do eixo 3 do Projeto Educativo?"*
+- *"Quantos alunos tinha o curso de Técnico de Desporto no 1.º ano?"* (lido de uma tabela)
+- *"O que diz a página 80 do regulamento?"*
 
-Cada resposta indica **o documento e a página** de onde veio a informação, por exemplo `[1]`.
-Ao clicar em **🔍 Ver página no PDF**, abre-se a página original com o trecho destacado a amarelo.
+Cada resposta cita a fonte (`[1]`, e no regulamento também *artigo, n.º e alínea*). Em **Fontes** vê-se
+de que documento, capítulo, artigo e página veio cada trecho. O botão **🔍 Ver no PDF** mostra a página
+original com o trecho destacado a amarelo.
 
-Usa a API da [Groq](https://console.groq.com) (modelo `openai/gpt-oss-120b` por defeito) e
-uma interface em [Streamlit](https://streamlit.io). A lista de modelos é pedida à Groq quando o
-chatbot abre, por isso continua a funcionar quando a Groq retira modelos (já aconteceu com os Llama).
+Usa a API da [Groq](https://console.groq.com) e uma interface em [Streamlit](https://streamlit.io).
 
 ---
 
-## Como funciona
+## Como lê os documentos
+
+Para responder com precisão, o mais importante é ler bem os PDFs. Cada PDF é lido uma vez
+(cerca de 1 minuto para 160 páginas) e o resultado fica guardado em `dados/indice.json`:
+
+1. **Texto e layout** — o [`pymupdf4llm`](https://pymupdf.readthedocs.io/en/latest/pymupdf4llm/) com
+   o `pymupdf-layout` junta as linhas em parágrafos e reconhece títulos, listas (pontos `1 —`,
+   alíneas `a)`) e tabelas.
+2. **Tabelas** — se uma tabela sai com palavras partidas entre células (ex.: tabelas com cabeçalhos
+   na vertical ou células fundidas), é trocada pela leitura da grelha da própria tabela. As células
+   fundidas na vertical repetem o rótulo (ex.: "1.º Ciclo" em cada ano).
+3. **Limpeza** — retira cabeçalhos/rodapés repetidos ("Regulamento Interno AEHN · Página 80 de 160"),
+   as páginas de índice, palavras coladas ("residenteporgrandesgrupos") e junta títulos e
+   parágrafos partidos pelo fim da linha ou da página.
+4. **Estrutura** — o regulamento fica dividido em **artigos** (todos os 274, incluindo o 58.º-A e o
+   58.º-B), cada um com o capítulo, secção e subsecção a que pertence. O Projeto Educativo fica
+   dividido pelos seus títulos.
+5. **Verificação** — compara as palavras lidas com as do PDF e avisa (na barra lateral e no
+   `indexar.py`) se alguma página ficou incompleta.
+
+## Como responde
 
 ```
-PDFs ──► extrair texto por página e parágrafo (PyMuPDF) ──► índice de pesquisa (BM25)
-                                                                    │
-pergunta ──► Groq (modelo pequeno) reescreve a pergunta, ───────────┤
-             sugere palavras-chave, documento e página              ▼
-                                                     trechos mais relevantes
-                                                     + página completa se for pedida
-                                                                    │
-                                                                    ▼
-                       Groq (modelo grande) responde SÓ com esses trechos e cita [n]
+pergunta ──► Groq (modelo pequeno) reescreve a pergunta, sugere palavras-chave como estariam
+             escritas no documento e escolhe capítulos/secções num MAPA dos documentos
+                                   │
+                                   ▼
+            fontes: artigo/página pedidos ("artigo 120.º", "página 80") vão inteiros
+                    + pesquisa BM25 nos trechos, com bónus para as secções escolhidas
+                                   │
+                                   ▼
+            Groq (modelo grande) responde SÓ com essas fontes, cita [n], artigo, n.º e alínea
 ```
 
-1. **Leitura dos PDFs**: o texto de cada página é extraído e dividido em parágrafos.
-   Fica guardado em `dados/indice.json`, por isso cada PDF só é lido uma vez.
-   Se um PDF for alterado ou adicionado, é lido de novo automaticamente.
-2. **Pesquisa**: usa **BM25**, o algoritmo clássico dos motores de busca por palavras-chave,
-   adaptado ao português (ignora acentos, plurais e palavras como "de", "o", "que").
-   A Groq não tem modelos de *embeddings*, por isso não se usa uma base de dados vetorial
-   (como o ChromaDB do projeto [AGENTE-IA](https://github.com/EduhxH/AGENTE-IA)). Assim, também
-   não é preciso descarregar modelos, e corre em qualquer PC.
-3. **Reescrita da pergunta**: antes de pesquisar, um modelo pequeno e rápido (`openai/gpt-oss-20b`)
-   transforma perguntas como *"e isso?"* numa pergunta completa e acrescenta sinónimos.
-4. **Páginas**: se a pergunta referir uma página (*"página 12"*, *"pág. 3 a 5"*, *"p. 7"*),
-   a página inteira é enviada com os parágrafos numerados (§1, §2, ...).
-5. **Resposta**: o modelo recebe só os trechos encontrados e é instruído a não inventar.
-   Se a informação não estiver nos PDFs, diz que não encontrou.
+- A Groq não tem modelos de *embeddings*. Por isso a pesquisa é por palavras (BM25, adaptado ao
+  português) e a parte "por significado" vem da IA, que escolhe as secções a partir do mapa.
+- O mapa tem só capítulos, secções e intervalos de artigos (~2 200 tokens). O índice completo dos
+  274 artigos gastaria demasiado do limite do plano gratuito (8 000 tokens por minuto por modelo).
+- Os modelos são pedidos à Groq quando o chatbot abre (os Llama já foram retirados). Por defeito
+  responde o `openai/gpt-oss-120b` e prepara a pesquisa o `openai/gpt-oss-20b` (ou o `qwen`, se o
+  limite do primeiro acabar).
 
 ## Instalação
 
@@ -62,6 +76,7 @@ python -m venv .venv
 .venv\Scripts\activate          # Windows  (Linux/Mac: source .venv/bin/activate)
 pip install -r requirements.txt
 copy .env.example .env          # Linux/Mac: cp .env.example .env
+python indexar.py               # opcional: lê os PDFs mostrando o progresso
 streamlit run app.py
 ```
 
@@ -74,40 +89,52 @@ streamlit run app.py
    ```
    Também se pode colar na barra lateral do chatbot, no campo *Chave da API Groq*.
 
-Sem chave, o chatbot continua a funcionar em modo de pesquisa: mostra os trechos e páginas encontrados, mas não escreve respostas.
+Sem chave, o chatbot continua a funcionar em modo de pesquisa: mostra os trechos e páginas
+encontrados, mas não escreve respostas.
 
-## Adicionar documentos
+## Documentos
 
-- Copiar os PDFs para a pasta **`documentos/`** (pode ter subpastas), **ou**
-- Arrastá-los para o campo **Adicionar PDFs** na barra lateral.
+Os PDFs ficam em **`documentos/`** (podem estar em subpastas) ou são arrastados para o campo
+**Adicionar PDFs** na barra lateral. Não vão para o repositório git.
 
-Com muitos PDFs, pode-se correr `python indexar.py` antes de abrir o chatbot para ver o progresso.
+Para testar sem os documentos reais, `python exemplos/gerar_pdfs_exemplo.py` cria 3 PDFs de exemplo
+de Físico-Química.
 
-Os 3 PDFs que vêm na pasta (`Movimentos e Forcas.pdf`, `Reacoes Quimicas.pdf`,
-`Atomos e Tabela Periodica.pdf`) são **textos de exemplo** criados para testar
-(`python exemplos/gerar_pdfs_exemplo.py`). Podem ser apagados.
+## Testes de precisão
+
+`testes/avaliar.py` faz 23 perguntas aos documentos reais e verifica, para cada uma:
+- se a fonte certa (artigo, secção ou página) chegou ao modelo;
+- se a resposta tem os factos certos, tirados dos PDFs (ex.: "dez dias", "caução", "76,4");
+- se a pesquisa só por palavras, sem a IA, também a encontrava.
+
+```bash
+python testes/avaliar.py          # todas (~11 min, por causa do limite por minuto da Groq)
+python testes/avaliar.py 1 2 3    # só algumas
+```
 
 ## Estrutura
 
 ```
 app.py                  interface (Streamlit): chat, fontes, barra lateral
-rag/pdfs.py             extrair texto dos PDFs, dividir em trechos, desenhar página com destaque
-rag/indice.py           ler a pasta documentos/, guardar cache, pesquisa BM25, detetar "página N"
-rag/assistente.py       ligação à Groq: reescrever pergunta, escolher fontes, responder com citações
-indexar.py              ler todos os PDFs pelo terminal (opcional)
+rag/pdfs.py             leitura dos PDFs: markdown, tabelas, limpeza, verificação
+rag/estrutura.py        divisão em capítulos/secções/artigos e em trechos
+rag/indice.py           cache em dados/, pesquisa BM25, mapa dos documentos
+rag/texto.py            português: acentos, plurais, "página 12", "artigo 58.º-A"
+rag/assistente.py       ligação à Groq: preparar a pesquisa, escolher fontes, responder
+indexar.py              ler os PDFs pelo terminal, com progresso
+testes/avaliar.py       bateria de perguntas com respostas verificadas
 iniciar.bat             instalar e abrir no Windows com duplo clique
-documentos/             os PDFs
-dados/indice.json       cache do texto extraído (criada automaticamente)
-exemplos/               gerador dos PDFs de exemplo
 ```
 
 ## Limitações
 
+- **Imagens**: o texto dentro de imagens não é lido (ex.: a citação da página 5 do Projeto
+  Educativo). Do organograma só se aproveitam os nomes das caixas, sem a hierarquia. As fórmulas da
+  página 4 (TPS e TCD) também não, mas a explicação em texto delas sim.
 - **PDFs digitalizados** (fotografias/scans) não têm texto: o chatbot avisa na barra lateral.
-  Para esses é preciso OCR primeiro (por exemplo com o `ocrmypdf`).
-- A pesquisa é por **palavras**: se a pergunta usar palavras muito diferentes das do documento,
-  pode não encontrar. Ajuda indicar o documento ou a página. A reescrita com sinónimos reduz este problema.
-- O **plano gratuito** da Groq tem limites de pedidos por minuto. Se aparecer o aviso, espera-se um minuto.
+  Precisam de OCR primeiro (por exemplo com o `ocrmypdf`).
+- O **plano gratuito** da Groq tem 8 000 tokens por minuto por modelo; cada pergunta gasta ~3 000
+  no modelo pequeno e ~4 000 no grande. Com perguntas muito seguidas, a resposta pode demorar uns
+  segundos a mais (a biblioteca espera e tenta de novo).
 - Os trechos dos PDFs relevantes para cada pergunta são **enviados para a Groq** (serviço na cloud).
-  Não usar com documentos confidenciais.
-- Como qualquer IA, pode errar. Confirme sempre na fonte indicada (botão *Ver página no PDF*).
+- Como qualquer IA, pode errar. Confirma sempre na fonte indicada (botão *Ver no PDF*).

@@ -1,4 +1,4 @@
-"""Assistente de Físico-Química: perguntas sobre vários PDFs (Streamlit + Groq).
+"""Assistente de documentos: perguntas sobre vários PDFs (Streamlit + Groq).
 
 Executar:  streamlit run app.py
 """
@@ -11,16 +11,18 @@ import groq
 import streamlit as st
 from dotenv import load_dotenv
 
-from rag.assistente import (MODELOS_PREFERIDOS, criar_cliente, explicar_erro, modelo_reescrita,
-                            modelos_disponiveis, recolher_fontes, reescrever, responder)
+from rag.assistente import (MODELOS_PREFERIDOS, criar_cliente, explicar_erro, modelos_disponiveis,
+                            modelos_reescrita, recolher_fontes, reescrever, responder)
 from rag.indice import PASTA_DOCUMENTOS, Indice, assinatura_pasta, sincronizar
 from rag.pdfs import imagem_pagina
+from rag.texto import texto_simples
 
 load_dotenv()
-st.set_page_config(page_title="Assistente de FQ", page_icon="⚛️", layout="wide")
+st.set_page_config(page_title="Assistente de documentos", page_icon="📚", layout="wide")
 
 
-@st.cache_resource(show_spinner="A ler os PDFs (só demora na primeira vez)...", max_entries=2)
+@st.cache_resource(show_spinner="A ler os PDFs pela primeira vez (cerca de 1 minuto por cada 150 páginas)...",
+                   max_entries=2)
 def carregar_indice(assinatura: tuple) -> Indice:
     # `assinatura` muda quando um PDF é adicionado/alterado, o que refaz o índice
     return Indice(sincronizar())
@@ -41,9 +43,15 @@ def escapar(texto: str) -> str:
     return re.sub(r"([\\`*_{}\[\]<>#+!|$~])", r"\\\1", texto)
 
 
+def _paginas(fonte: dict) -> str:
+    if fonte["pagina"] == fonte["pagina_fim"]:
+        return f"página {fonte['pagina']}"
+    return f"páginas {fonte['pagina']}–{fonte['pagina_fim']}"
+
+
 @st.dialog("Página do PDF", width="large")
 def ver_pagina(fonte: dict, indice: Indice):
-    st.markdown(f"**{escapar(fonte['documento'])}** — página {fonte['pagina']}")
+    st.markdown(f"**{escapar(fonte['titulo_doc'])}** — {escapar(fonte['rotulo'])} · {_paginas(fonte)}")
     caminho = indice.caminho(fonte["documento"])
     if not caminho.exists():
         st.warning("Este PDF já não está na pasta documentos/.")
@@ -51,7 +59,9 @@ def ver_pagina(fonte: dict, indice: Indice):
     if fonte["tipo"] == "trecho":
         st.caption("O trecho usado na resposta está destacado a amarelo.")
     destacar = fonte["texto"] if fonte["tipo"] == "trecho" else ""
-    st.image(desenhar_pagina(str(caminho), fonte["pagina"], destacar), width="stretch")
+    for pagina in range(fonte["pagina"], min(fonte["pagina_fim"], fonte["pagina"] + 2) + 1):
+        st.image(desenhar_pagina(str(caminho), pagina, destacar), width="stretch",
+                 caption=f"Página {pagina}")
 
 
 def mostrar_fontes(fontes: list[dict], chave: int, indice: Indice):
@@ -59,11 +69,12 @@ def mostrar_fontes(fontes: list[dict], chave: int, indice: Indice):
         return
     with st.expander(f"📄 Fontes ({len(fontes)})"):
         for n, fonte in enumerate(fontes, start=1):
-            tipo = "página completa" if fonte["tipo"] == "pagina" else "trecho"
-            st.markdown(f"**[{n}] {escapar(fonte['documento'])}** — página {fonte['pagina']} · *{tipo}*")
-            texto = fonte["texto"] if len(fonte["texto"]) <= 600 else fonte["texto"][:600] + "…"
-            st.caption(escapar(texto).replace("\n", "  \n"))
-            if st.button("🔍 Ver página no PDF", key=f"ver-{chave}-{n}"):
+            st.markdown(f"**[{n}] {escapar(fonte['titulo_doc'])}** — {escapar(fonte['rotulo'])} · {_paginas(fonte)}")
+            if fonte.get("caminho"):
+                st.caption(escapar(fonte["caminho"]))
+            texto = texto_simples(fonte["texto"])
+            st.caption(escapar(texto if len(texto) <= 500 else texto[:500] + "…"))
+            if st.button("🔍 Ver no PDF", key=f"ver-{chave}-{n}"):
                 ver_pagina(fonte, indice)
             if n < len(fontes):
                 st.divider()
@@ -93,14 +104,16 @@ with st.sidebar:
             st.write("Ainda não há PDFs. Adiciona-os acima ou copia-os para a pasta `documentos/`.")
         for nome in nomes:
             doc = indice.documentos[nome]
-            paginas = len(doc["paginas"])
-            caracteres = sum(len(p) for pag in doc["paginas"] for p in pag)
+            paginas = doc.get("num_paginas", 0)
+            caracteres = sum(len(e["texto"]) for e in doc["elementos"])
             if doc["erro"]:
                 st.error(f"**{nome}**: não foi possível ler ({doc['erro']})")
             elif caracteres < 30 * max(paginas, 1):
                 st.warning(f"**{nome}**: quase sem texto. Será um PDF digitalizado (imagem)? Precisa de OCR.")
             else:
-                st.markdown(f"- {escapar(nome)} · {paginas} pág.")
+                st.markdown(f"- **{escapar(indice.titulo(nome))}** · {paginas} pág.  \n  `{nome}`")
+                for aviso in doc.get("avisos", []):
+                    st.caption(f"⚠️ {escapar(aviso)}")
 
     filtro = st.multiselect("Pesquisar só em", nomes, placeholder="Todos os documentos")
 
@@ -118,15 +131,15 @@ with st.sidebar:
     modelo = st.selectbox("Modelo", modelos,
                           index=modelos.index(modelo_padrao) if modelo_padrao in modelos else 0)
     k = st.slider("Trechos por pergunta", 3, 10, 6)
-    temperatura = st.slider("Criatividade (temperatura)", 0.0, 1.0, 0.2, 0.1)
+    temperatura = st.slider("Criatividade (temperatura)", 0.0, 1.0, 0.1, 0.1)
     if st.button("🗑️ Limpar conversa", width="stretch"):
         st.session_state.mensagens = []
         st.rerun()
 
 # ---------------------------------------------------------------- conversa
-st.title("⚛️ Assistente de Físico-Química")
-st.caption("Faz perguntas sobre os PDFs: conceitos, trechos ou *«o que significa o 2.º parágrafo "
-           "da página 3?»*. Cada resposta indica o documento e a página de onde veio.")
+st.title("📚 Assistente de documentos")
+st.caption("Faz perguntas sobre os PDFs: regras, artigos, metas, trechos ou *«o que diz o artigo 118.º?»*. "
+           "Cada resposta indica o documento, o artigo e a página de onde veio.")
 
 for i, mensagem in enumerate(st.session_state.mensagens):
     with st.chat_message(mensagem["papel"]):
@@ -137,9 +150,9 @@ caixa_exemplos, exemplo = st.empty(), None
 if not st.session_state.mensagens and nomes:
     with caixa_exemplos.container():
         st.write("Experimenta:")
-        exemplos = [f"Explica o 2.º parágrafo da página 1 de «{Path(nomes[0]).stem}»",
-                    "O que diz a Lei de Lavoisier?",
-                    "Quais são as três Leis de Newton?"]
+        exemplos = ["Quantas faltas injustificadas pode dar um aluno do 1.º ciclo?",
+                    "O que diz o artigo 120.º?",
+                    "Quais são as metas do eixo 3 do Projeto Educativo?"]
         for coluna, texto in zip(st.columns(len(exemplos)), exemplos):
             if coluna.button(texto, width="stretch"):
                 exemplo = texto
@@ -153,7 +166,7 @@ if pergunta:
 
     with st.chat_message("assistant"):
         with st.status("A procurar nos documentos...") as estado:
-            plano = (reescrever(cliente, modelo_reescrita(modelos), pergunta, historico, indice)
+            plano = (reescrever(cliente, modelos_reescrita(modelos), pergunta, historico, indice)
                      if cliente else {})
             fontes = recolher_fontes(indice, pergunta, plano, k=k, filtro=filtro or None)
             estado.update(label=f"Encontrei {len(fontes)} fonte(s)", state="complete", expanded=False)
