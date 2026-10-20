@@ -50,12 +50,20 @@ pergunta ──► Groq (modelo pequeno) reescreve a pergunta, sugere palavras-c
                                    │
                                    ▼
             Groq (modelo grande) responde SÓ com essas fontes, cita [n], artigo, n.º e alínea
+                                   │
+                                   ▼
+            verificação: o texto entre aspas na resposta tem de existir nas fontes;
+            se não existir, aparece um aviso por baixo da resposta
 ```
 
 - A Groq não tem modelos de *embeddings*. Por isso a pesquisa é por palavras (BM25, adaptado ao
   português) e a parte "por significado" vem da IA, que escolhe as secções a partir do mapa.
 - O mapa tem só capítulos, secções e intervalos de artigos (~2 200 tokens). O índice completo dos
   274 artigos gastaria demasiado do limite do plano gratuito (8 000 tokens por minuto por modelo).
+- A verificação das citações (“...”, «...», "...") ignora maiúsculas, acentos, pontuação, markdown
+  e marcadores como "a)" ou "1 —", e aceita omissões marcadas com "(…)". Citações com menos de 3
+  palavras (termos como "Kit Digital") não são verificadas. A resposta nunca é bloqueada: o aviso
+  só diz ao professor para confirmar aquela frase no PDF.
 - Os modelos são pedidos à Groq quando o chatbot abre (os Llama já foram retirados). Por defeito
   responde o `openai/gpt-oss-120b` e prepara a pesquisa o `openai/gpt-oss-20b` (ou o `qwen`, se o
   limite do primeiro acabar).
@@ -102,15 +110,28 @@ de Físico-Química.
 
 ## Testes de precisão
 
-`testes/avaliar.py` faz 23 perguntas aos documentos reais e verifica, para cada uma:
+`testes/avaliar.py` faz 62 perguntas aos documentos reais: as 23 iniciais e mais perguntas com
+palavras diferentes das do texto ("roupa" → "vestuário", "castigo" → "medida disciplinar"), que
+juntam 2 ou 3 artigos, sobre tabelas do Projeto Educativo, de seguimento ("E o 9.º?") e sem resposta
+nos documentos. Para cada uma verifica:
 - se a fonte certa (artigo, secção ou página) chegou ao modelo;
 - se a resposta tem os factos certos, tirados dos PDFs (ex.: "dez dias", "caução", "76,4");
-- se a pesquisa só por palavras, sem a IA, também a encontrava.
+- se a pesquisa só por palavras, sem a IA, também a encontrava;
+- se o texto citado na resposta (entre aspas ou em linhas "> ...") existe nas fontes.
 
 ```bash
-python testes/avaliar.py          # todas (~11 min, por causa do limite por minuto da Groq)
+python testes/avaliar.py          # todas (~35 min, por causa do limite por minuto da Groq)
 python testes/avaliar.py 1 2 3    # só algumas
 ```
+
+As respostas completas, as fontes e as citações não encontradas ficam em `dados/avaliacao.json`.
+
+Resultados (20/10/2026): na primeira volta completa, 56/62 respostas certas (as 23 iniciais todas
+certas). As 6 falhas eram de recolha de fontes ou de respostas incompletas; depois das correções às
+instruções, 5 passaram a certas e as perguntas 1–14 continuaram 14/14 (a volta parou aí por causa do
+limite diário da Groq). Continua a falhar a 38 (o telemóvel: a sanção está no n.º 6 do artigo 111.º,
+que só remete para a "alínea r)" e não diz "telemóvel"). Das 45 citações verificadas nessa volta, 1
+não estava nas fontes: uma frase do artigo 128.º citada no plural.
 
 ## Estrutura
 
@@ -136,5 +157,9 @@ iniciar.bat             instalar e abrir no Windows com duplo clique
 - O **plano gratuito** da Groq tem 8 000 tokens por minuto por modelo; cada pergunta gasta ~3 000
   no modelo pequeno e ~4 000 no grande. Com perguntas muito seguidas, a resposta pode demorar uns
   segundos a mais (a biblioteca espera e tenta de novo).
+- Há também um limite **diário** de 200 000 tokens por modelo, que recupera aos poucos (~8 000 por
+  hora): dá para ~50–60 perguntas seguidas por dia. A bateria completa de testes gasta quase todo
+  esse limite. Quando o modelo pequeno chega ao limite, a pesquisa passa a ser preparada pelo
+  `qwen`; quando é o grande, a app avisa e pode escolher-se outro modelo na barra lateral.
 - Os trechos dos PDFs relevantes para cada pergunta são **enviados para a Groq** (serviço na cloud).
 - Como qualquer IA, pode errar. Confirma sempre na fonte indicada (botão *Ver no PDF*).

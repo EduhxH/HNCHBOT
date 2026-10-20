@@ -12,7 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from rag.assistente import (MODELOS_PREFERIDOS, criar_cliente, explicar_erro, modelos_disponiveis,
-                            modelos_reescrita, recolher_fontes, reescrever, responder)
+                            modelos_reescrita, recolher_fontes, reescrever, responder, verificar_citacoes)
 from rag.indice import PASTA_DOCUMENTOS, Indice, assinatura_pasta, sincronizar
 from rag.pdfs import imagem_pagina
 from rag.texto import texto_simples
@@ -62,6 +62,14 @@ def ver_pagina(fonte: dict, indice: Indice):
     for pagina in range(fonte["pagina"], min(fonte["pagina_fim"], fonte["pagina"] + 2) + 1):
         st.image(desenhar_pagina(str(caminho), pagina, destacar), width="stretch",
                  caption=f"Página {pagina}")
+
+
+def mostrar_citacoes_em_falta(citacoes: list[str]):
+    """Aviso discreto para o texto citado que não está nas fontes (pode ter sido inventado)."""
+    for citacao in citacoes:
+        citacao = texto_simples(re.sub(r"\s*\[\d+\]", "", citacao))  # sem [1] nem negritos
+        citacao = citacao if len(citacao) <= 200 else citacao[:200] + "…"
+        st.caption(f"⚠️ Esta citação não foi encontrada nas fontes: «{escapar(citacao)}»")
 
 
 def mostrar_fontes(fontes: list[dict], chave: int, indice: Indice):
@@ -144,6 +152,7 @@ st.caption("Faz perguntas sobre os PDFs: regras, artigos, metas, trechos ou *«o
 for i, mensagem in enumerate(st.session_state.mensagens):
     with st.chat_message(mensagem["papel"]):
         st.markdown(mensagem["conteudo"])
+        mostrar_citacoes_em_falta(mensagem.get("citacoes_em_falta", []))
         mostrar_fontes(mensagem.get("fontes", []), i, indice)
 
 caixa_exemplos, exemplo = st.empty(), None
@@ -171,6 +180,7 @@ if pergunta:
             fontes = recolher_fontes(indice, pergunta, plano, k=k, filtro=filtro or None)
             estado.update(label=f"Encontrei {len(fontes)} fonte(s)", state="complete", expanded=False)
 
+        citacoes_em_falta = []
         if not fontes:
             resposta = "Não encontrei nada sobre isso nos documentos. Tenta outras palavras ou indica o documento/página."
             st.markdown(resposta)
@@ -184,6 +194,8 @@ if pergunta:
                     responder(cliente, modelo, pergunta, fontes, historico, plano, temperatura))
                 if not isinstance(resposta, str):
                     resposta = "".join(map(str, resposta))
+                citacoes_em_falta = verificar_citacoes(resposta, fontes, historico, pergunta)
+                mostrar_citacoes_em_falta(citacoes_em_falta)
             except groq.APIError as erro:
                 resposta = f"⚠️ {explicar_erro(erro)}"
                 st.markdown(resposta)
@@ -191,6 +203,6 @@ if pergunta:
 
     st.session_state.mensagens = historico + [
         {"papel": "user", "conteudo": pergunta},
-        {"papel": "assistant", "conteudo": resposta, "fontes": fontes},
+        {"papel": "assistant", "conteudo": resposta, "fontes": fontes, "citacoes_em_falta": citacoes_em_falta},
     ]
     st.rerun()  # volta a desenhar a conversa a partir do histórico (estrutura estável)

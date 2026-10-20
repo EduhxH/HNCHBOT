@@ -7,7 +7,9 @@ Fluxo de cada pergunta:
   2. junta as fontes: artigos e páginas pedidos explicitamente vão inteiros;
      o resto vem da pesquisa BM25, com bónus para as secções escolhidas;
   3. (Groq, modelo grande) responde só com base nessas fontes, citando [n],
-     o artigo e o número/alínea.
+     o artigo e o número/alínea;
+  4. o texto que a resposta cita (entre aspas ou em linhas "> ...") é procurado
+     nas fontes: o que não estiver lá é devolvido para a app avisar (verificar_citacoes).
 """
 
 import json
@@ -17,7 +19,8 @@ import re
 import groq
 
 from .indice import Indice
-from .texto import artigos_mencionados, e_seguimento, paginas_mencionadas, remover_referencias
+from .texto import (artigos_mencionados, e_seguimento, normalizar, paginas_mencionadas, remover_referencias,
+                    texto_simples)
 
 # A Groq vai retirando modelos, por isso a lista real é pedida à API
 # (ver modelos_disponiveis); estas são só as preferências, por ordem.
@@ -44,6 +47,7 @@ Regras:
 - Quando te perguntarem o que diz um artigo, ponto ou parágrafo, transcreve as partes relevantes entre aspas e depois explica por palavras simples. Na explicação não acrescentes exemplos, nomes de documentos, órgãos ou regras que não estejam nas fontes.
 - Se as fontes só responderem a parte da pergunta, responde a essa parte e diz claramente o que não encontraste.
 - Se a resposta não estiver nas fontes, responde só "Não encontrei essa informação nos documentos." e sugere reformular a pergunta ou indicar o artigo/página. Não sugiras outros documentos (regulamentos, leis, planos): só existem os que aparecem nas fontes.
+- Quando as fontes enumeram itens que respondem à pergunta (alíneas a), b), c)..., medidas, requisitos, membros), indica-os todos, mesmo que só peçam exemplos.
 - Nas tabelas, confirma a linha e a coluna antes de dar um valor.
 - Nas páginas completas, os parágrafos estão numerados (§1, §2, ...) e os títulos não contam como parágrafos.
 - Responde em português europeu (de Portugal), como nos documentos: "eletrões", "facto", "equipa", "tu fazes" — nunca português do Brasil ("elétrons", "fato", "time", "você"). Se a pergunta for noutra língua, responde nessa língua.
@@ -52,8 +56,8 @@ Regras:
 INSTRUCOES_REESCRITA = """Preparas a pesquisa nos documentos de um agrupamento de escolas. Recebes o MAPA dos documentos (grupos de secções, cada um com um código, ex.: G12), o fim da conversa e a nova pergunta.
 Devolve APENAS um objeto JSON com:
 - "pergunta": a nova pergunta reescrita de forma completa e independente da conversa (resolve "isso", "e o artigo seguinte?", "e na página a seguir?", etc.);
-- "palavras_chave": 4 a 10 palavras ou expressões curtas como estariam escritas num documento escolar em português de Portugal, incluindo sinónimos e termos técnicos (ex.: para "quantas vezes posso faltar?" → "limite de faltas", "faltas injustificadas", "excesso de faltas");
-- "grupos": até 3 códigos do MAPA onde a resposta deve estar, do mais provável para o menos provável;
+- "palavras_chave": 4 a 10 palavras ou expressões curtas como estariam escritas num documento escolar em português de Portugal, incluindo sinónimos e termos técnicos (ex.: para "quantas vezes posso faltar?" → "limite de faltas", "faltas injustificadas", "excesso de faltas"). Usa o vocabulário formal dos regulamentos, não o do dia a dia nem o do Brasil (ex.: "notas" → "classificações", "chumbar" → "retenção", "pais" → "encarregados de educação", "até quando" → "prazo", "dias úteis", "quem decide" → "compete", "competência");
+- "grupos": até 3 códigos do MAPA onde a resposta deve estar, do mais provável para o menos provável (números, estatísticas e metas costumam estar no Projeto Educativo; regras, deveres, prazos e sanções no Regulamento Interno). Se tiveres dúvidas, escolhe grupos de capítulos diferentes;
 - "documento": o nome do ficheiro a que a pergunta se refere, ou null se não for claro;
 - "artigos": números de artigos referidos pela pergunta ou pela conversa (ex.: "120", "58-A"), ou [];
 - "paginas": números de página referidos pela pergunta ou pela conversa, ou [].
@@ -98,6 +102,9 @@ def explicar_erro(erro: Exception) -> str:
     """Mensagem simples para os erros mais comuns da API."""
     if isinstance(erro, groq.AuthenticationError):
         return "A chave da Groq é inválida. Confirma o GROQ_API_KEY no ficheiro .env."
+    if isinstance(erro, groq.RateLimitError) and "per day" in str(erro):
+        return ("Limite diário de tokens da Groq atingido para este modelo (plano gratuito: 200 000 por dia, "
+                "recupera aos poucos ao longo do dia). Escolhe outro modelo na barra lateral ou tenta mais tarde.")
     if isinstance(erro, groq.RateLimitError):
         return "Limite de pedidos da Groq atingido (plano gratuito). Espera um minuto e tenta outra vez."
     if isinstance(erro, groq.APIConnectionError):
@@ -131,7 +138,7 @@ def reescrever(cliente, modelos: list[str], pergunta: str, historico: list[dict]
                 ],
             )
             dados = json.loads(resposta.choices[0].message.content)
-            return dados if isinstance(dados, dict) else {}
+            return {**dados, "modelo": modelo} if isinstance(dados, dict) else {}
         except (groq.RateLimitError, groq.NotFoundError):
             continue
         except (groq.APIError, json.JSONDecodeError):
@@ -283,6 +290,64 @@ def responder(cliente, modelo: str, pergunta: str, fontes: list[dict], historico
             yield _limpar_resposta(pronto)
     if pendente:
         yield _limpar_resposta(pendente)
+
+
+# texto entre aspas: “...”, «...» ou "..." (as aspas retas não passam de uma linha para a outra)
+_RE_CITACAO = re.compile(r'“([^”]+)”|«([^»]+)»|"([^"\n]+)"')
+# linhas citadas em markdown ("> 1 — O aluno..."): o modelo usa-as para transcrever artigos
+_RE_LINHA_CITADA = re.compile(r"^[ \t]*>[ \t>]*(.*)$", re.M)
+# rótulo a negrito que o modelo põe no início da linha citada ("**N.º 2** –", "**1.º**")
+_RE_ROTULO = re.compile(r"^\s*\*\*[^*]{1,60}\*\*\s*[–—:.-]?\s*")
+# referência que o modelo junta à citação: "(artigo 118.º, n.º 1, alínea a))"
+_RE_REFERENCIA = re.compile(r"\((?:artigos?|art\.|n\.?\s*[ºo°]|al[íi]nea|ponto|p[áa]gina|p[áa]g\.)"
+                            r"[^()]*(?:\([^()]*\)[^()]*)*\)", re.I)
+# omissões dentro de uma citação: "...", "…", "(...)", "[…]"
+_RE_OMISSAO = re.compile(r"[(\[]?\s*(?:\.{3}|…)\s*[)\]]?")
+# marcadores de listas ("a)", "ii)", "1 —"): ao citar, o modelo às vezes tira-os ou junta-os
+_RE_MARCADOR = re.compile(r"(?<![\w.])(?:[a-z]|[ivx]+|\d{1,2})\s*\)|(?<![\w.])\d{1,2}\s*[—–]\s")
+# com menos palavras são termos soltos ("Kit Digital"), não transcrições
+MIN_PALAVRAS_CITACAO = 3
+
+
+def _palavras(texto: str) -> str:
+    """Só as palavras, sem acentos, pontuação, markdown nem marcadores: "**a)** O Diretor;" -> "o diretor"."""
+    # etiquetas (<mark>, <br>), citações [n] e o que as páginas completas acrescentam (§1, "(título)")
+    texto = re.sub(r"</?[a-z]+[^>]*>|\[\d+\]|§\d+|\(título\)", " ", texto)
+    texto = _RE_MARCADOR.sub(" ", normalizar(texto_simples(texto)))
+    return " ".join(re.findall(r"[a-z0-9]+", texto))
+
+
+def citacoes(resposta: str) -> list[tuple[str, list[str]]]:
+    """Citações da resposta a verificar: (texto citado, partes separadas pelas omissões).
+
+    Cada linha citada ("> ...") é uma citação; as aspas dentro dela fazem parte do texto.
+    """
+    linhas = [_RE_ROTULO.sub("", m.group(1)) for m in _RE_LINHA_CITADA.finditer(resposta)]
+    entre_aspas = [next(g for g in m.groups() if g is not None)
+                   for m in _RE_CITACAO.finditer(_RE_LINHA_CITADA.sub("", resposta))]
+    encontradas = []
+    for citacao in linhas + entre_aspas:
+        citacao = citacao.strip()
+        texto = _RE_REFERENCIA.sub(" … ", citacao)  # a referência não faz parte da citação
+        partes = [p for p in map(_palavras, _RE_OMISSAO.split(texto)) if p]
+        if sum(len(p.split()) for p in partes) >= MIN_PALAVRAS_CITACAO:
+            encontradas.append((citacao, partes))
+    return encontradas
+
+
+def verificar_citacoes(resposta: str, fontes: list[dict], historico=(), pergunta: str = "") -> list[str]:
+    """Citações da resposta que não existem nas fontes enviadas ao modelo (anti-invenção).
+
+    Compara só as palavras (ver _palavras). As fontes das últimas respostas também
+    contam, porque o modelo as vê na conversa. Não conta como invenção repetir
+    texto da própria pergunta.
+    """
+    fontes = list(fontes) + [f for m in list(historico)[-4:] for f in m.get("fontes", [])]
+    base = " " + " ".join(_palavras(f"{_cabecalho_fonte(1, f)}\n{f['texto']}") for f in fontes) + " "
+    base += _palavras(pergunta) + " "
+    em_falta = [citacao for citacao, partes in citacoes(resposta)
+                if not all(f" {parte} " in base for parte in partes)]
+    return list(dict.fromkeys(em_falta))
 
 
 def _limpar_resposta(texto: str) -> str:
