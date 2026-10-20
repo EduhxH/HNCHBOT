@@ -1,8 +1,3 @@
-"""Assistente de documentos: perguntas sobre vários PDFs (Streamlit + Groq).
-
-Executar:  streamlit run app.py
-"""
-
 import os
 import re
 from pathlib import Path
@@ -18,13 +13,12 @@ from rag.pdfs import imagem_pagina
 from rag.texto import texto_simples
 
 load_dotenv()
-st.set_page_config(page_title="Assistente de documentos", page_icon="📚", layout="wide")
+st.set_page_config(page_title="Assistente de documentos", layout="wide")
 
 
 @st.cache_resource(show_spinner="A ler os PDFs pela primeira vez (cerca de 1 minuto por cada 150 páginas)...",
                    max_entries=2)
 def carregar_indice(assinatura: tuple) -> Indice:
-    # `assinatura` muda quando um PDF é adicionado/alterado, o que refaz o índice
     return Indice(sincronizar())
 
 
@@ -39,7 +33,6 @@ def desenhar_pagina(caminho: str, pagina: int, destacar: str) -> bytes:
 
 
 def escapar(texto: str) -> str:
-    """Evita que símbolos do PDF ($, *, _, ...) sejam interpretados como Markdown."""
     return re.sub(r"([\\`*_{}\[\]<>#+!|$~])", r"\\\1", texto)
 
 
@@ -65,24 +58,23 @@ def ver_pagina(fonte: dict, indice: Indice):
 
 
 def mostrar_citacoes_em_falta(citacoes: list[str]):
-    """Aviso discreto para o texto citado que não está nas fontes (pode ter sido inventado)."""
     for citacao in citacoes:
-        citacao = texto_simples(re.sub(r"\s*\[\d+\]", "", citacao))  # sem [1] nem negritos
+        citacao = texto_simples(re.sub(r"\s*\[\d+\]", "", citacao))
         citacao = citacao if len(citacao) <= 200 else citacao[:200] + "…"
-        st.caption(f"⚠️ Esta citação não foi encontrada nas fontes: «{escapar(citacao)}»")
+        st.caption(f"Atenção: esta citação não foi encontrada nas fontes: «{escapar(citacao)}»")
 
 
 def mostrar_fontes(fontes: list[dict], chave: int, indice: Indice):
     if not fontes:
         return
-    with st.expander(f"📄 Fontes ({len(fontes)})"):
+    with st.expander(f"Fontes ({len(fontes)})"):
         for n, fonte in enumerate(fontes, start=1):
             st.markdown(f"**[{n}] {escapar(fonte['titulo_doc'])}** — {escapar(fonte['rotulo'])} · {_paginas(fonte)}")
             if fonte.get("caminho"):
                 st.caption(escapar(fonte["caminho"]))
             texto = texto_simples(fonte["texto"])
             st.caption(escapar(texto if len(texto) <= 500 else texto[:500] + "…"))
-            if st.button("🔍 Ver no PDF", key=f"ver-{chave}-{n}"):
+            if st.button("Ver no PDF", key=f"ver-{chave}-{n}"):
                 ver_pagina(fonte, indice)
             if n < len(fontes):
                 st.divider()
@@ -91,16 +83,15 @@ def mostrar_fontes(fontes: list[dict], chave: int, indice: Indice):
 st.session_state.setdefault("mensagens", [])
 st.session_state.setdefault("envio", 0)
 
-# ---------------------------------------------------------------- barra lateral
 with st.sidebar:
-    st.header("📚 Documentos")
+    st.header("Documentos")
     enviados = st.file_uploader("Adicionar PDFs", type="pdf", accept_multiple_files=True,
                                 key=f"envio-{st.session_state.envio}")
     if enviados:
         PASTA_DOCUMENTOS.mkdir(exist_ok=True)
         for ficheiro in enviados:
             (PASTA_DOCUMENTOS / Path(ficheiro.name).name).write_bytes(ficheiro.getbuffer())
-        st.session_state.envio += 1  # limpa o campo de envio
+        st.session_state.envio += 1
         st.rerun()
 
     indice = carregar_indice(assinatura_pasta())
@@ -121,18 +112,18 @@ with st.sidebar:
             else:
                 st.markdown(f"- **{escapar(indice.titulo(nome))}** · {paginas} pág.  \n  `{nome}`")
                 for aviso in doc.get("avisos", []):
-                    st.caption(f"⚠️ {escapar(aviso)}")
+                    st.caption(f"Aviso: {escapar(aviso)}")
 
     filtro = st.multiselect("Pesquisar só em", nomes, placeholder="Todos os documentos")
 
-    st.header("⚙️ Definições")
+    st.header("Definições")
     chave_manual = st.text_input("Chave da API Groq", type="password",
                                  help="Não é preciso se já estiver no ficheiro .env")
     cliente = criar_cliente(chave_manual or None)
     if cliente:
-        st.caption("✅ Chave da Groq configurada")
+        st.caption("Chave da Groq configurada")
     else:
-        st.caption("⚠️ Sem chave da Groq: só são mostrados os trechos encontrados.")
+        st.caption("Sem chave da Groq: só são mostrados os trechos encontrados.")
 
     modelos = listar_modelos(chave_manual or os.getenv("GROQ_API_KEY", "")) if cliente else MODELOS_PREFERIDOS
     modelo_padrao = os.getenv("GROQ_MODELO")
@@ -140,12 +131,11 @@ with st.sidebar:
                           index=modelos.index(modelo_padrao) if modelo_padrao in modelos else 0)
     k = st.slider("Trechos por pergunta", 3, 10, 6)
     temperatura = st.slider("Criatividade (temperatura)", 0.0, 1.0, 0.1, 0.1)
-    if st.button("🗑️ Limpar conversa", width="stretch"):
+    if st.button("Limpar conversa", width="stretch"):
         st.session_state.mensagens = []
         st.rerun()
 
-# ---------------------------------------------------------------- conversa
-st.title("📚 Assistente de documentos")
+st.title("Assistente de documentos")
 st.caption("Faz perguntas sobre os PDFs: regras, artigos, metas, trechos ou *«o que diz o artigo 118.º?»*. "
            "Cada resposta indica o documento, o artigo e a página de onde veio.")
 
@@ -185,7 +175,7 @@ if pergunta:
             resposta = "Não encontrei nada sobre isso nos documentos. Tenta outras palavras ou indica o documento/página."
             st.markdown(resposta)
         elif not cliente:
-            resposta = ("⚠️ **Sem chave da Groq** não consigo escrever uma resposta, "
+            resposta = ("**Sem chave da Groq** não consigo escrever uma resposta, "
                         "mas estes são os trechos mais relevantes que encontrei (abre as fontes).")
             st.markdown(resposta)
         else:
@@ -197,7 +187,7 @@ if pergunta:
                 citacoes_em_falta = verificar_citacoes(resposta, fontes, historico, pergunta)
                 mostrar_citacoes_em_falta(citacoes_em_falta)
             except groq.APIError as erro:
-                resposta = f"⚠️ {explicar_erro(erro)}"
+                resposta = f"**Erro:** {explicar_erro(erro)}"
                 st.markdown(resposta)
         mostrar_fontes(fontes, len(historico) + 1, indice)
 
@@ -205,4 +195,4 @@ if pergunta:
         {"papel": "user", "conteudo": pergunta},
         {"papel": "assistant", "conteudo": resposta, "fontes": fontes, "citacoes_em_falta": citacoes_em_falta},
     ]
-    st.rerun()  # volta a desenhar a conversa a partir do histórico (estrutura estável)
+    st.rerun()

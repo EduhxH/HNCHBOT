@@ -1,17 +1,3 @@
-"""Junta a pesquisa nos PDFs com os modelos da Groq.
-
-Fluxo de cada pergunta:
-  1. (Groq, modelo pequeno) reescreve a pergunta tendo em conta a conversa,
-     sugere palavras-chave como estariam escritas no documento e escolhe,
-     no mapa dos documentos, os capítulos/secções onde procurar;
-  2. junta as fontes: artigos e páginas pedidos explicitamente vão inteiros;
-     o resto vem da pesquisa BM25, com bónus para as secções escolhidas;
-  3. (Groq, modelo grande) responde só com base nessas fontes, citando [n],
-     o artigo e o número/alínea;
-  4. o texto que a resposta cita (entre aspas ou em linhas "> ...") é procurado
-     nas fontes: o que não estiver lá é devolvido para a app avisar (verificar_citacoes).
-"""
-
 import json
 import os
 import re
@@ -22,20 +8,14 @@ from .indice import Indice
 from .texto import (artigos_mencionados, e_seguimento, normalizar, paginas_mencionadas, remover_referencias,
                     texto_simples)
 
-# A Groq vai retirando modelos, por isso a lista real é pedida à API
-# (ver modelos_disponiveis); estas são só as preferências, por ordem.
 MODELOS_PREFERIDOS = [
     "openai/gpt-oss-120b",
     "llama-3.3-70b-versatile",
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-20b",
 ]
-# para preparar a pesquisa basta um modelo pequeno e rápido
 MODELOS_REESCRITA = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b", "llama-3.1-8b-instant"]
-# modelos da Groq que não são de conversa (áudio, filtros de segurança, árabe)
 _NAO_CONVERSA = ("whisper", "orpheus", "guard", "allam", "tts")
-# o plano gratuito da Groq permite 8000 tokens por minuto em cada modelo:
-# ~8000 caracteres de fontes são ~2500 tokens
 MAX_CARACTERES_CONTEXTO = 8000
 
 INSTRUCOES = """És o assistente de consulta dos documentos oficiais de um agrupamento de escolas (por exemplo, o Regulamento Interno e o Projeto Educativo). Ajudas um professor a encontrar e a interpretar o que os documentos dizem.
@@ -74,32 +54,28 @@ def criar_cliente(chave: str | None = None) -> groq.Groq | None:
 
 
 def modelos_disponiveis(cliente) -> list[str]:
-    """Modelos de conversa da conta Groq, com os preferidos primeiro."""
     try:
         ids = [m.id for m in cliente.models.list().data]
     except groq.APIError:
-        return MODELOS_PREFERIDOS  # sem ligação: usa a lista fixa
+        return MODELOS_PREFERIDOS
     conversa = [m for m in ids if not any(p in m.lower() for p in _NAO_CONVERSA)]
     return ([m for m in MODELOS_PREFERIDOS if m in conversa]
             + sorted(m for m in conversa if m not in MODELOS_PREFERIDOS)) or MODELOS_PREFERIDOS
 
 
 def modelos_reescrita(disponiveis: list[str]) -> list[str]:
-    """Modelos para preparar a pesquisa, por ordem (o seguinte é usado se o limite do anterior acabar)."""
     return [m for m in MODELOS_REESCRITA if m in disponiveis] or disponiveis[:1]
 
 
 def _opcoes(modelo: str, esforco: str = "low") -> dict:
-    """Parâmetros extra para os modelos que "pensam" antes de responder."""
     if modelo.startswith("openai/gpt-oss"):
         return {"reasoning_effort": esforco}
     if modelo.startswith("qwen/"):
-        return {"reasoning_format": "hidden"}  # não mostrar o raciocínio (<think>) na resposta
+        return {"reasoning_format": "hidden"}
     return {}
 
 
 def explicar_erro(erro: Exception) -> str:
-    """Mensagem simples para os erros mais comuns da API."""
     if isinstance(erro, groq.AuthenticationError):
         return "A chave da Groq é inválida. Confirma o GROQ_API_KEY no ficheiro .env."
     if isinstance(erro, groq.RateLimitError) and "per day" in str(erro):
@@ -123,10 +99,8 @@ def _historico_curto(historico: list[dict], n: int = 4) -> str:
 
 
 def reescrever(cliente, modelos: list[str], pergunta: str, historico: list[dict], indice: Indice) -> dict:
-    """Pede ao modelo pequeno para preparar a pesquisa. Em caso de erro devolve {}."""
     for modelo in modelos:
         try:
-            # sem novas tentativas: se o limite acabou, passa logo ao modelo seguinte
             resposta = cliente.with_options(max_retries=0).chat.completions.create(
                 model=modelo,
                 temperature=0,
@@ -142,7 +116,7 @@ def reescrever(cliente, modelos: list[str], pergunta: str, historico: list[dict]
         except (groq.RateLimitError, groq.NotFoundError):
             continue
         except (groq.APIError, json.JSONDecodeError):
-            return {}  # a pesquisa continua só com a pergunta original
+            return {}
     return {}
 
 
@@ -151,7 +125,6 @@ def _como_lista(valor) -> list:
 
 
 def _documento(indice: Indice, pergunta: str, plano: dict, filtro) -> str | None:
-    """Documento a que a pergunta se refere: o indicado pela IA, senão o nome escrito na pergunta."""
     documento = plano.get("documento")
     if documento not in indice.documentos:
         candidatos = (indice.documentos_mencionados(str(documento)) if documento else []) \
@@ -163,7 +136,6 @@ def _documento(indice: Indice, pergunta: str, plano: dict, filtro) -> str | None
 
 
 def _fonte_da_pagina(indice: Indice, nome: str, numero: int) -> dict | None:
-    """A página inteira, com os parágrafos numerados (§1, §2, ...)."""
     linhas, n = [], 0
     for el in indice.elementos_da_pagina(nome, numero):
         if el["tipo"] == "titulo":
@@ -181,14 +153,11 @@ def _fonte_da_pagina(indice: Indice, nome: str, numero: int) -> dict | None:
 
 
 def recolher_fontes(indice: Indice, pergunta: str, plano: dict, k: int = 6, filtro=None) -> list[dict]:
-    """Escolhe as fontes a enviar ao modelo, por ordem de prioridade e até ao limite de tamanho."""
     pergunta_completa = str(plano.get("pergunta") or "")
     documento = _documento(indice, pergunta, plano, filtro)
     documentos = filtro or None
     explicitas = []
 
-    # 1) artigos pedidos: escritos na pergunta ou, numa pergunta de seguimento, indicados pela IA
-    #    (noutras perguntas, os artigos que a IA sugere são só uma pista para a pesquisa)
     sugeridos = [str(a).upper() for a in _como_lista(plano.get("artigos"))
                  if re.fullmatch(r"\d{1,3}(-[A-Za-z])?", str(a))][:3]
     artigos = artigos_mencionados(pergunta) or (sugeridos if e_seguimento(pergunta) else [])
@@ -199,7 +168,6 @@ def recolher_fontes(indice: Indice, pergunta: str, plano: dict, k: int = 6, filt
         for id_secao in secoes:
             explicitas += [{**t, "tipo": "trecho"} for t in indice.trechos_da_secao(id_secao)]
 
-    # 2) pesquisa por palavras, com bónus para as secções que a IA escolheu no mapa
     escolhidas = indice.secoes_dos_grupos(_como_lista(plano.get("grupos"))[:3])
     escolhidas |= {s for a in sugeridos for s in indice.secoes_do_artigo(a, documentos)}
     palavras_chave = " ".join(str(p) for p in _como_lista(plano.get("palavras_chave")))
@@ -216,7 +184,6 @@ def recolher_fontes(indice: Indice, pergunta: str, plano: dict, k: int = 6, filt
     limite = pontos[0][0] * 0.25 if pontos else 0
     pesquisadas = [{**indice.trechos[i], "tipo": "trecho"} for v, i in pontos[:k] if v >= limite]
 
-    # 3) páginas pedidas: a página inteira (sem documento indicado, a do melhor resultado)
     paginas = paginas_mencionadas(pergunta) or [int(p) for p in _como_lista(plano.get("paginas"))
                                                 if str(p).isdigit()][:3]
     nome = documento or (pesquisadas[0]["documento"] if pesquisadas else None) \
@@ -225,17 +192,16 @@ def recolher_fontes(indice: Indice, pergunta: str, plano: dict, k: int = 6, filt
         fonte = _fonte_da_pagina(indice, nome, numero)
         if fonte:
             explicitas.append(fonte)
-    if explicitas:  # pediu um artigo/página concreto: só 2 resultados da pesquisa, como contexto
+    if explicitas:
         pesquisadas = pesquisadas[:2]
 
-    # junta tudo sem repetir e sem passar o limite de tamanho
     fontes, vistos, total = [], set(), 0
     for fonte in explicitas + pesquisadas:
         if fonte["id"] in vistos:
             continue
         if total + len(fonte["texto"]) > MAX_CARACTERES_CONTEXTO and fontes:
             if fonte in explicitas:
-                continue  # um artigo grande pode não caber todo; tenta o resto
+                continue
             break
         vistos.add(fonte["id"])
         fontes.append({**fonte, "titulo_doc": indice.titulo(fonte["documento"])})
@@ -258,7 +224,6 @@ def _cabecalho_fonte(n: int, fonte: dict) -> str:
 
 def responder(cliente, modelo: str, pergunta: str, fontes: list[dict], historico: list[dict],
               plano: dict, temperatura: float = 0.1):
-    """Gera a resposta em streaming (devolve pedaços de texto)."""
     texto_fontes = "\n\n".join(f"{_cabecalho_fonte(n, f)}\n{f['texto']}" for n, f in enumerate(fontes, start=1))
     interpretacao = plano.get("pergunta")
     if interpretacao and interpretacao != pergunta:
@@ -266,12 +231,10 @@ def responder(cliente, modelo: str, pergunta: str, fontes: list[dict], historico
 
     mensagens = [{"role": "system", "content": INSTRUCOES}]
     for m in historico[-4:]:
-        # as citações [n] antigas referem-se a outras fontes: retiram-se
         mensagens.append({"role": m["papel"], "content": re.sub(r"\[\d+\]", "", m["conteudo"])[:1500]})
     mensagens.append({"role": "user", "content":
                       f"FONTES:\n{texto_fontes or '(nenhum trecho encontrado)'}\n\nPERGUNTA: {pergunta}"})
 
-    # "medium": um pouco mais de raciocínio dá citações mais completas e fiéis às fontes
     stream = cliente.chat.completions.create(
         model=modelo, messages=mensagens, temperature=temperatura, stream=True,
         extra_body=_opcoes(modelo, "medium"))
@@ -280,7 +243,6 @@ def responder(cliente, modelo: str, pergunta: str, fontes: list[dict], historico
         if not (pedaco.choices and pedaco.choices[0].delta.content):
             continue
         pendente += pedaco.choices[0].delta.content
-        # uma citação pode vir partida em vários pedaços: guarda o que vem depois de um "[" aberto
         corte = max(pendente.rfind("["), pendente.rfind("【"))
         if corte >= 0 and "]" not in pendente[corte:] and "】" not in pendente[corte:]:
             pronto, pendente = pendente[:corte], pendente[corte:]
@@ -292,43 +254,30 @@ def responder(cliente, modelo: str, pergunta: str, fontes: list[dict], historico
         yield _limpar_resposta(pendente)
 
 
-# texto entre aspas: “...”, «...» ou "..." (as aspas retas não passam de uma linha para a outra)
 _RE_CITACAO = re.compile(r'“([^”]+)”|«([^»]+)»|"([^"\n]+)"')
-# linhas citadas em markdown ("> 1 — O aluno..."): o modelo usa-as para transcrever artigos
 _RE_LINHA_CITADA = re.compile(r"^[ \t]*>[ \t>]*(.*)$", re.M)
-# rótulo a negrito que o modelo põe no início da linha citada ("**N.º 2** –", "**1.º**")
 _RE_ROTULO = re.compile(r"^\s*\*\*[^*]{1,60}\*\*\s*[–—:.-]?\s*")
-# referência que o modelo junta à citação: "(artigo 118.º, n.º 1, alínea a))"
 _RE_REFERENCIA = re.compile(r"\((?:artigos?|art\.|n\.?\s*[ºo°]|al[íi]nea|ponto|p[áa]gina|p[áa]g\.)"
                             r"[^()]*(?:\([^()]*\)[^()]*)*\)", re.I)
-# omissões dentro de uma citação: "...", "…", "(...)", "[…]"
 _RE_OMISSAO = re.compile(r"[(\[]?\s*(?:\.{3}|…)\s*[)\]]?")
-# marcadores de listas ("a)", "ii)", "1 —"): ao citar, o modelo às vezes tira-os ou junta-os
 _RE_MARCADOR = re.compile(r"(?<![\w.])(?:[a-z]|[ivx]+|\d{1,2})\s*\)|(?<![\w.])\d{1,2}\s*[—–]\s")
-# com menos palavras são termos soltos ("Kit Digital"), não transcrições
 MIN_PALAVRAS_CITACAO = 3
 
 
 def _palavras(texto: str) -> str:
-    """Só as palavras, sem acentos, pontuação, markdown nem marcadores: "**a)** O Diretor;" -> "o diretor"."""
-    # etiquetas (<mark>, <br>), citações [n] e o que as páginas completas acrescentam (§1, "(título)")
     texto = re.sub(r"</?[a-z]+[^>]*>|\[\d+\]|§\d+|\(título\)", " ", texto)
     texto = _RE_MARCADOR.sub(" ", normalizar(texto_simples(texto)))
     return " ".join(re.findall(r"[a-z0-9]+", texto))
 
 
 def citacoes(resposta: str) -> list[tuple[str, list[str]]]:
-    """Citações da resposta a verificar: (texto citado, partes separadas pelas omissões).
-
-    Cada linha citada ("> ...") é uma citação; as aspas dentro dela fazem parte do texto.
-    """
     linhas = [_RE_ROTULO.sub("", m.group(1)) for m in _RE_LINHA_CITADA.finditer(resposta)]
     entre_aspas = [next(g for g in m.groups() if g is not None)
                    for m in _RE_CITACAO.finditer(_RE_LINHA_CITADA.sub("", resposta))]
     encontradas = []
     for citacao in linhas + entre_aspas:
         citacao = citacao.strip()
-        texto = _RE_REFERENCIA.sub(" … ", citacao)  # a referência não faz parte da citação
+        texto = _RE_REFERENCIA.sub(" … ", citacao)
         partes = [p for p in map(_palavras, _RE_OMISSAO.split(texto)) if p]
         if sum(len(p.split()) for p in partes) >= MIN_PALAVRAS_CITACAO:
             encontradas.append((citacao, partes))
@@ -336,12 +285,6 @@ def citacoes(resposta: str) -> list[tuple[str, list[str]]]:
 
 
 def verificar_citacoes(resposta: str, fontes: list[dict], historico=(), pergunta: str = "") -> list[str]:
-    """Citações da resposta que não existem nas fontes enviadas ao modelo (anti-invenção).
-
-    Compara só as palavras (ver _palavras). As fontes das últimas respostas também
-    contam, porque o modelo as vê na conversa. Não conta como invenção repetir
-    texto da própria pergunta.
-    """
     fontes = list(fontes) + [f for m in list(historico)[-4:] for f in m.get("fontes", [])]
     base = " " + " ".join(_palavras(f"{_cabecalho_fonte(1, f)}\n{f['texto']}") for f in fontes) + " "
     base += _palavras(pergunta) + " "
@@ -351,7 +294,6 @@ def verificar_citacoes(resposta: str, fontes: list[dict], historico=(), pergunta
 
 
 def _limpar_resposta(texto: str) -> str:
-    """Os modelos gpt-oss às vezes citam como 【1】 ou [1†L1-L3]: passa tudo a [1]."""
     texto = texto.replace("【", "[").replace("】", "]")
     texto = re.sub(r"\[(\d+)†[^\]]*\]", r"[\1]", texto)
     return texto.replace(" ", " ").replace(" ", " ").replace("‑", "-")

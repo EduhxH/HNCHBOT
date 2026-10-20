@@ -1,15 +1,3 @@
-"""Índice de pesquisa sobre todos os PDFs da pasta `documentos/`.
-
-Cada PDF é lido uma única vez (cerca de 1 minuto para 160 páginas): o
-resultado fica guardado em `dados/indice.json` e só volta a ser lido se o
-ficheiro mudar.
-
-Os documentos ficam divididos em secções (artigos, títulos) e trechos.
-A pesquisa por palavras usa BM25, que não precisa de modelos de embeddings
-(a Groq não os tem). Para perguntas pelo significado, a IA escolhe secções
-a partir do índice dos documentos (ver `catalogo` e assistente.py).
-"""
-
 import json
 import math
 import re
@@ -23,9 +11,8 @@ from .texto import texto_simples, tokenizar
 RAIZ = Path(__file__).resolve().parent.parent
 PASTA_DOCUMENTOS = RAIZ / "documentos"
 FICHEIRO_INDICE = RAIZ / "dados" / "indice.json"
-VERSAO = 2  # aumenta se mudares a forma como os PDFs são lidos
+VERSAO = 2
 
-# parâmetros clássicos do BM25
 K1, B = 1.5, 0.75
 
 
@@ -40,16 +27,11 @@ def _assinatura(caminho: Path) -> str:
 
 
 def assinatura_pasta(pasta: Path = PASTA_DOCUMENTOS) -> tuple:
-    """Muda sempre que um PDF é adicionado, removido ou alterado."""
     return tuple((p.relative_to(pasta).as_posix(), _assinatura(p)) for p in _listar_pdfs(pasta))
 
 
 def sincronizar(pasta: Path = PASTA_DOCUMENTOS, ficheiro: Path = FICHEIRO_INDICE,
                 progresso=None) -> dict:
-    """Lê os PDFs novos ou alterados e devolve {nome: documento lido}.
-
-    `progresso(nome, pagina, total_paginas)` é chamado enquanto um PDF é lido.
-    """
     cache = {}
     if ficheiro.exists():
         try:
@@ -57,7 +39,7 @@ def sincronizar(pasta: Path = PASTA_DOCUMENTOS, ficheiro: Path = FICHEIRO_INDICE
             if dados.get("versao") == VERSAO:
                 cache = dados["documentos"]
         except (json.JSONDecodeError, KeyError):
-            pass  # índice corrompido: volta a ler tudo
+            pass
 
     documentos, mudou = {}, False
     for caminho in _listar_pdfs(pasta):
@@ -70,9 +52,9 @@ def sincronizar(pasta: Path = PASTA_DOCUMENTOS, ficheiro: Path = FICHEIRO_INDICE
         aviso = (lambda pagina, total, nome=nome: progresso(nome, pagina, total)) if progresso else None
         try:
             lido, erro = extrair_documento(caminho, aviso), None
-        except ValueError as e:  # PDF protegido por palavra-passe
+        except ValueError as e:
             lido, erro = {}, str(e)
-        except Exception:  # o PyMuPDF não conseguiu abrir o ficheiro
+        except Exception:
             lido, erro = {}, "ficheiro danificado ou não é um PDF válido"
         documentos[nome] = {"titulo": "", "num_paginas": 0, "elementos": [], "avisos": [],
                             **lido, "assinatura": assinatura, "erro": erro}
@@ -86,15 +68,12 @@ def sincronizar(pasta: Path = PASTA_DOCUMENTOS, ficheiro: Path = FICHEIRO_INDICE
 
 
 def _curto(rotulo: str) -> str:
-    """Rótulo compacto para o índice da IA: "Artigo 120.º (Medidas...)" -> "Art. 120.º Medidas..."."""
     rotulo = re.sub(r"^Artigo\s+", "Art. ", rotulo)
     rotulo = re.sub(r"[()]", "", rotulo)
     return rotulo if len(rotulo) <= 100 else rotulo[:97] + "..."
 
 
 class Indice:
-    """Secções e trechos de todos os PDFs, com pesquisa BM25."""
-
     def __init__(self, documentos: dict, pasta: Path = PASTA_DOCUMENTOS):
         self.documentos = documentos
         self.pasta = pasta
@@ -103,10 +82,7 @@ class Indice:
             for secao in construir_secoes(nome, doc["elementos"]):
                 secao["id"] = f"S{len(self.secoes) + 1}"
                 self.secoes.append(secao)
-                # trechos quase vazios (ex.: a capa) só atrapalham a pesquisa
                 self.trechos += [t for t in dividir_em_trechos(secao) if len(texto_simples(t["texto"])) >= 40]
-        # palavras dos títulos dos documentos ("regulamento interno") servem para escolher
-        # o documento, não para pesquisar dentro dele
         self._termos_titulos = {t for t in tokenizar(" ".join(f"{Path(n).stem} {self.titulo(n)}" for n in documentos))
                                 if t.isalpha() and len(t) >= 3}
         self._secoes = {s["id"]: s for s in self.secoes}
@@ -114,8 +90,6 @@ class Indice:
         for trecho in self.trechos:
             self._trechos_da_secao[trecho["secao"]].append(trecho)
 
-        # grupos para o mapa da IA: os artigos agrupam-se pela secção/capítulo onde
-        # estão; as outras secções (ex.: do Projeto Educativo) são um grupo cada
         self.grupos, chaves = [], {}
         for secao in self.secoes:
             if secao["tipo"] == "artigo":
@@ -130,8 +104,6 @@ class Indice:
             secao["grupo"] = chaves[chave]["id"]
         self._grupos = {g["id"]: g for g in self.grupos}
 
-        # índice invertido: termo -> [(nº do trecho, frequência)]
-        # o título da secção conta duas vezes (diz muito sobre o conteúdo)
         self._ocorrencias = defaultdict(list)
         self._comprimento = []
         for i, t in enumerate(self.trechos):
@@ -144,7 +116,6 @@ class Indice:
         self._idf = {termo: math.log(1 + (total - len(lista) + 0.5) / (len(lista) + 0.5))
                      for termo, lista in self._ocorrencias.items()}
 
-    # ------------------------------------------------------------ documentos
     def nomes(self) -> list[str]:
         return list(self.documentos)
 
@@ -158,7 +129,6 @@ class Indice:
         return self.documentos[nome].get("num_paginas", 0)
 
     def documentos_mencionados(self, texto: str) -> list[str]:
-        """Documentos cujo nome ou título aparece no texto, do mais provável para o menos."""
         termos = set(tokenizar(texto))
         pontos = {}
         for nome in self.documentos:
@@ -167,7 +137,6 @@ class Indice:
                 pontos[nome] = len(termos & palavras) / len(palavras)
         return sorted(pontos, key=pontos.get, reverse=True)
 
-    # ------------------------------------------------------------ secções
     def secao(self, id_secao: str) -> dict | None:
         return self._secoes.get(id_secao)
 
@@ -175,7 +144,6 @@ class Indice:
         return self._trechos_da_secao.get(id_secao, [])
 
     def secoes_do_artigo(self, numero: str, documentos=None) -> list[str]:
-        """Secções do artigo `numero` ("120", "58-A"); "58" também encontra "58-A" e "58-B"."""
         numero = numero.upper()
         return [s["id"] for s in self.secoes
                 if s["artigo"] and (s["artigo"] == numero or s["artigo"].startswith(numero + "-"))
@@ -189,9 +157,6 @@ class Indice:
         return {s for g in ids_grupos if g in self._grupos for s in self._grupos[g]["secoes"]}
 
     def mapa(self) -> str:
-        """Mapa compacto dos documentos (grupos de secções com código), para a IA escolher
-        onde procurar. Só capítulos/secções e intervalos de artigos: o índice completo
-        dos 274 artigos gastaria demasiados tokens do limite por minuto da Groq."""
         linhas = []
         for nome in self.nomes():
             linhas.append(f"## {self.titulo(nome)} (ficheiro {nome})")
@@ -200,7 +165,7 @@ class Indice:
                 partes = grupo["caminho"].split(" › ") if grupo["caminho"] else ["(início)"]
                 muda = next((i for i, (a, b) in enumerate(zip(anterior, partes)) if a != b),
                             min(len(anterior), len(partes)))
-                muda = min(muda, len(partes) - 1)  # a última parte é a linha do grupo
+                muda = min(muda, len(partes) - 1)
                 linhas += [f"# {_curto(parte)}" for parte in partes[muda:-1]]
                 anterior = partes
                 artigos = [self._secoes[s]["artigo"] for s in grupo["secoes"] if self._secoes[s]["artigo"]]
@@ -209,9 +174,7 @@ class Indice:
                 linhas.append(f"{grupo['id']} {_curto(partes[-1])}{intervalo}")
         return "\n".join(linhas)
 
-    # ------------------------------------------------------------ pesquisa
     def pontuar(self, consulta: str, extra: str = "") -> dict[int, float]:
-        """Pontuação BM25 de cada trecho. `extra` (palavras sugeridas pela IA) vale metade."""
         pesos = {t: 1.0 for t in tokenizar(consulta)}
         for t in tokenizar(extra):
             pesos.setdefault(t, 0.5)
@@ -226,12 +189,6 @@ class Indice:
 
     def pesquisar(self, consulta: str, k: int = 6, documentos=None, extra: str = "",
                   preferir=(), minimo_relativo: float = 0.3) -> list[dict]:
-        """Devolve os `k` trechos mais relevantes (com a chave "pontuacao").
-
-        documentos      – se indicado, só pesquisa nestes documentos
-        preferir        – documentos mencionados na pergunta (ganham um bónus)
-        minimo_relativo – descarta trechos com menos de 30% da pontuação do melhor
-        """
         resultados = []
         for i, valor in self.pontuar(consulta, extra).items():
             nome = self.trechos[i]["documento"]

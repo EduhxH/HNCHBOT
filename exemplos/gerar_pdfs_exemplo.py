@@ -1,17 +1,10 @@
-"""Gera 3 PDFs de exemplo (textos de apoio de Físico-Química) para testar o chatbot.
-
-Uso:  python exemplos/gerar_pdfs_exemplo.py
-Os PDFs são criados na pasta documentos/. Depois podes apagá-los e pôr
-lá os PDFs verdadeiros.
-"""
-
 from pathlib import Path
 
 import pymupdf
 
 PASTA = Path(__file__).resolve().parent.parent / "documentos"
 FONTES_WINDOWS = Path("C:/Windows/Fonts")
-MARGEM, LARGURA, ALTURA = 60, 595, 842  # A4 em pontos
+MARGEM, LARGURA, ALTURA = 60, 595, 842
 
 DOCUMENTOS = {
     "Movimentos e Forcas.pdf": ("Movimentos e Forças — Texto de apoio", [
@@ -95,7 +88,6 @@ DOCUMENTOS = {
 
 
 def _fontes():
-    """Usa a Arial do Windows (tem Δ, ², →); senão, a Helvetica do PDF."""
     normal, negrito = FONTES_WINDOWS / "arial.ttf", FONTES_WINDOWS / "arialbd.ttf"
     if normal.exists() and negrito.exists():
         return {"t": ("arialbd", str(negrito)), "p": ("arial", str(normal))}
@@ -131,7 +123,6 @@ def gerar(nome, titulo, paginas):
                 pag.insert_text((MARGEM, y), linha, fontsize=tamanho, fontname=nome_fonte, fontfile=ficheiro)
                 y += tamanho * 1.45
             y += tamanho * 0.9
-        # número da página no rodapé
         pag.insert_text((LARGURA / 2 - 3, ALTURA - 30), str(num), fontsize=9,
                         fontname=fontes["p"][0], fontfile=fontes["p"][1])
     doc.subset_fonts()

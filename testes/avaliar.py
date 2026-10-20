@@ -1,18 +1,3 @@
-"""Bateria de perguntas para medir a precisão do chatbot nos documentos reais
-(Regulamento Interno e Projeto Educativo do AEHN).
-
-Para cada pergunta verifica:
-  - fonte: se a secção/artigo/página certa chegou ao modelo;
-  - resposta: se a resposta contém os factos esperados (tirados dos PDFs);
-  - só BM25: se a pesquisa por palavras, sem a ajuda da IA, também a encontrava;
-  - citações: se o texto que a resposta cita (entre aspas ou em linhas "> ...") existe nas fontes.
-
-Uso:  python testes/avaliar.py            (todas as perguntas, ~35 min por causa
-                                           do limite de tokens por minuto da Groq;
-                                           gasta quase todo o limite diário do plano gratuito)
-      python testes/avaliar.py 1 4 15     (só algumas perguntas)
-"""
-
 import json
 import re
 import sys
@@ -29,7 +14,6 @@ from rag.indice import RAIZ, Indice, sincronizar  # noqa: E402
 from rag.texto import normalizar  # noqa: E402
 
 RI, PE = "regulamento-interno-aehn_2025.pdf", "pe-22_25_vdefinitiva.pdf"
-# respostas completas, fontes e citações de cada pergunta (o terminal só mostra o início)
 FICHEIRO_RESULTADOS = RAIZ / "dados" / "avaliacao.json"
 
 
@@ -49,9 +33,6 @@ def algum(*testes):
     return lambda f: any(t(f) for t in testes)
 
 
-# (pergunta, fonte esperada, factos que a resposta deve conter, continua a conversa anterior?)
-# a fonte esperada pode ser um tuplo: todas essas fontes têm de chegar ao modelo
-# cada facto pode ser um texto ou um tuplo de alternativas ("dez dias", "10 dias")
 PERGUNTAS = [
     ("Quantas faltas injustificadas pode dar um aluno do 1.º ciclo num ano letivo?", artigo("118"), [("dez dias", "10 dias")], False),
     ("O que diz o artigo 120.º?", artigo("120"), ["recuper", "primeira vez"], False),
@@ -82,7 +63,6 @@ PERGUNTAS = [
     ("O que significa o 2.º parágrafo da página 5 do Projeto Educativo?", pagina(PE, 5),
      [("articulação", "integração")], False),
 
-    # ---- palavras diferentes das do texto (sinónimos, linguagem do dia a dia)
     ("Quem fica no lugar do diretor quando ele está ausente?", artigo("14"), ["subdiretor"], False),
     ("Até quando posso justificar uma falta do meu educando?", artigo("116"),
      [("3.º dia util", "3º dia util", "terceiro dia util")], False),
@@ -107,10 +87,8 @@ PERGUNTAS = [
      ["50 minutos"], False),
     ("O que acontece a um aluno que insiste em usar o telemóvel nas aulas?", artigo("111"),
      ["repreensao registada", ("um dia de suspensao", "1 dia de suspensao")], False),
-    # o preço não está no texto: a resposta deve remeter para a tabela, sem inventar um valor
     ("Quanto custa a segunda via do cartão da escola?", artigo("192"), ["tabela"], False),
 
-    # ---- respostas que juntam 2 ou 3 artigos (ou os dois documentos)
     ("Qual é a diferença entre medidas corretivas e sancionatórias? Dá exemplos de cada.",
      (artigo("126"), artigo("128")), ["advertencia", "repreensao registada"], False),
     ("Quanto tempo duram os mandatos do diretor e dos membros do Conselho Geral?",
@@ -122,7 +100,6 @@ PERGUNTAS = [
     ("Quem aprova o Projeto Educativo e quando foi aprovado?", pagina(PE, 24),
      ["conselho geral", "2 de maio de 2023"], False),
 
-    # ---- tabelas do Projeto Educativo (linha e coluna certas)
     ("Quantos alunos estavam inscritos em Línguas e Humanidades no 10.º ano?", pagina(PE, 10), ["108"], False),
     ("Quantos alunos com medidas seletivas e adicionais havia no 3.º ciclo?", pagina(PE, 11), ["52"], False),
     ("Quantos alunos tinham escalão A da ação social escolar?", pagina(PE, 11), ["153"], False),
@@ -134,7 +111,6 @@ PERGUNTAS = [
     ("Qual é a população residente na freguesia do Ramalhal?", pagina(PE, 8), [("3 631", "3631", "3.631")], False),
     ("Quantas mobilidades Erasmus foram recebidas pelo agrupamento?", pagina(PE, 16), ["106"], False),
 
-    # ---- perguntas de seguimento ("e o 9.º?", "o mandato dele")
     ("Quantos alunos tinha o 7.º ano em 2021/2022?", pagina(PE, 10), ["79"], False),
     ("E o 9.º?", pagina(PE, 10), ["93"], True),
     ("Quem elege o diretor?", algum(artigo("15"), artigo("7")), ["conselho geral"], False),
@@ -142,7 +118,6 @@ PERGUNTAS = [
     ("Pode ser reconduzido para um terceiro mandato seguido?", artigo("17"),
      ["terceiro mandato", ("nao e permitid", "nao sendo permitid", "nao pode", "nao permite")], True),
 
-    # ---- sem resposta nos documentos
     ("Qual é o valor da propina dos cursos profissionais?", None, ["nao encontrei"], False),
     ("Quantos dias de férias têm os professores por ano?", None, ["nao encontrei"], False),
     ("Qual é o número de telefone da escola sede?", None, ["nao encontrei"], False),
@@ -155,7 +130,6 @@ def _encontrada(esperado, fontes: list[dict]) -> bool:
 
 
 def _normal(texto: str) -> str:
-    """Sem acentos, vírgula decimal como ponto e sem espaços antes de "%" ("0,5 %" -> "0.5%")."""
     texto = re.sub(r"[\s  ]+", " ", normalizar(texto).replace(",", "."))
     return texto.replace(" %", "%")
 
@@ -163,7 +137,7 @@ def _normal(texto: str) -> str:
 def main():
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     escolhidas = {int(a) for a in sys.argv[1:]} or set(range(1, len(PERGUNTAS) + 1))
-    cliente = criar_cliente().with_options(max_retries=6)  # espera quando o limite por minuto acaba
+    cliente = criar_cliente().with_options(max_retries=6)
     disponiveis = modelos_disponiveis(cliente)
     modelo, reescrita = disponiveis[0], modelos_reescrita(disponiveis)
     print(f"modelo: {modelo} | reescrita: {reescrita}")
@@ -181,9 +155,9 @@ def main():
         so_bm25 = recolher_fontes(indice, pergunta, {})
         try:
             resposta = "".join(responder(cliente, modelo, pergunta, fontes, historico, plano))
-        except Exception as erro:  # mostra o erro e continua com as outras perguntas
+        except Exception as erro:
             resposta = f"ERRO: {explicar_erro(erro)}"
-            if "per day" in str(erro):  # limite diário: as perguntas seguintes falhariam todas
+            if "per day" in str(erro):
                 print(f"{n}. {pergunta}\n   {resposta}\n   A bateria parou aqui.")
                 break
         fonte_ok = _encontrada(esperado, fontes)
@@ -211,7 +185,7 @@ def main():
         FICHEIRO_RESULTADOS.write_text(json.dumps(completos, ensure_ascii=False, indent=1), encoding="utf-8")
         historico += [{"papel": "user", "conteudo": pergunta},
                       {"papel": "assistant", "conteudo": resposta, "fontes": fontes}]
-        time.sleep(max(0.0, 30 - (time.time() - inicio)))  # respeita os 8000 tokens/minuto
+        time.sleep(max(0.0, 30 - (time.time() - inicio)))
 
     total = len(resultados)
     print("=" * 100)

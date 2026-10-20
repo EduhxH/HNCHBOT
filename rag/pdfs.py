@@ -1,17 +1,3 @@
-"""Leitura de PDFs.
-
-Cada PDF é convertido em markdown, página a página, pelo pymupdf4llm com a
-análise de layout do pymupdf-layout: junta as linhas em parágrafos, marca
-títulos e listas e reconstrói as tabelas. Depois disso:
-  - as tabelas mal reconstruídas são trocadas pela leitura da grelha da
-    tabela (PyMuPDF), quando esta é melhor;
-  - palavras que ficaram coladas ("residenteporgrandes") são separadas;
-  - cabeçalhos/rodapés repetidos e páginas de índice são retirados.
-
-O resultado é uma lista de "elementos" (títulos, parágrafos e tabelas) pela
-ordem de leitura, cada um com a página onde aparece.
-"""
-
 import re
 import unicodedata
 from collections import Counter
@@ -22,17 +8,13 @@ import pymupdf4llm
 
 from .texto import normalizar, texto_simples
 
-PAGINAS_POR_LOTE = 10  # para poder mostrar o progresso em PDFs grandes
+PAGINAS_POR_LOTE = 10
 _RE_PALAVRA = re.compile(r"[^\W\d_]+")
-_RE_INDICE = re.compile(r"\.{5,}\s*\d*\s*$")  # "Artigo 3.º (Objetivos) ........ 18"
+_RE_INDICE = re.compile(r"\.{5,}\s*\d*\s*$")
 _RE_LISTA = re.compile(r"^\s*[-*]\s")
 
 
 def extrair_documento(caminho, progresso=None) -> dict:
-    """Lê o PDF e devolve {"titulo", "num_paginas", "elementos", "avisos"}.
-
-    `progresso(pagina, total)` é chamado à medida que as páginas são lidas.
-    """
     with pymupdf.open(caminho) as doc:
         if doc.needs_pass:
             raise ValueError("PDF protegido por palavra-passe")
@@ -64,10 +46,7 @@ def extrair_documento(caminho, progresso=None) -> dict:
             "elementos": _juntar_entre_paginas(elementos), "avisos": avisos}
 
 
-# ---------------------------------------------------------------- palavras
-
 def _palavras_da_pagina(pagina) -> set[str]:
-    """Palavras que existem mesmo na página (servem para validar o markdown)."""
     palavras = set()
     for palavra in pagina.get_text("words"):
         palavras.update(p.lower() for p in _RE_PALAVRA.findall(palavra[4]))
@@ -75,7 +54,6 @@ def _palavras_da_pagina(pagina) -> set[str]:
 
 
 def _segmentar(palavra: str, conhecidas: set[str]) -> list[str] | None:
-    """Divide "residenteporgrandes" em ["residente", "por", "grandes"] (o menor nº de partes)."""
     baixa, n = palavra.lower(), len(palavra)
     melhor = [None] * (n + 1)
     melhor[0] = []
@@ -105,7 +83,6 @@ def _separar_palavras_coladas(texto: str, conhecidas: set[str]) -> str:
 
 
 def _qualidade(texto: str, conhecidas: set[str]) -> float:
-    """Fração das palavras do texto que existem na página (palavras partidas baixam-na)."""
     palavras = [p.lower() for p in _RE_PALAVRA.findall(texto_simples(texto)) if len(p) >= 3]
     return sum(p in conhecidas for p in palavras) / len(palavras) if palavras else 1.0
 
@@ -116,12 +93,9 @@ def _palavras_em_falta(pagina, markdown: str) -> int:
     return sum((no_pdf - lidas).values())
 
 
-# ---------------------------------------------------------------- tabelas
-
 def _corrigir_tabelas(markdown: str, pagina, conhecidas: set[str]) -> str:
-    """Troca tabelas com palavras partidas pela leitura da grelha, se for melhor."""
     linhas = markdown.split("\n")
-    blocos, i = [], 0  # blocos de linhas seguidas que começam por "|"
+    blocos, i = [], 0
     while i < len(linhas):
         if linhas[i].startswith("|"):
             j = i
@@ -140,10 +114,8 @@ def _corrigir_tabelas(markdown: str, pagina, conhecidas: set[str]) -> str:
             continue
         if grelhas is None:
             grelhas = [_separar_palavras_coladas(_grelha_markdown(t), conhecidas) for t in _grelhas(pagina)]
-        # o markdown às vezes junta duas tabelas seguidas: compara também com 2-3 grelhas juntas
         candidatas = ["\n\n".join(grelhas[i:j]) for i in range(len(grelhas))
                       for j in range(i + 1, min(i + 3, len(grelhas)) + 1)]
-        # escolhe a candidata com as mesmas palavras (F1: nem palavras a menos nem a mais)
         palavras = {p for p in _RE_PALAVRA.findall(tabela.lower()) if p in conhecidas}
         melhor, semelhanca = None, 0.5
         for candidata in candidatas:
@@ -159,8 +131,6 @@ def _corrigir_tabelas(markdown: str, pagina, conhecidas: set[str]) -> str:
 
 
 def _grelhas(pagina) -> list[list[list[str]]]:
-    """Tabelas com linhas desenhadas, lidas pela grelha: [tabela][linha][célula]."""
-    # a análise de layout muda a deteção de tabelas; aqui queremos só a grelha
     layout = pymupdf._get_layout
     pymupdf._get_layout = None
     try:
@@ -168,13 +138,12 @@ def _grelhas(pagina) -> list[list[list[str]]]:
     finally:
         pymupdf._get_layout = layout
 
-    # o texto de cada célula vem das palavras da página (com os espaços certos)
     palavras = pagina.get_text("words")
 
     def texto_da_caixa(caixa):
         dentro = sorted((p for p in palavras
                          if caixa.contains(pymupdf.Point((p[0] + p[2]) / 2, (p[1] + p[3]) / 2))),
-                        key=lambda p: (p[5], p[6], p[7]))  # bloco, linha, palavra
+                        key=lambda p: (p[5], p[6], p[7]))
         return " ".join(p[4] for p in dentro)
 
     resultado = []
@@ -183,8 +152,6 @@ def _grelhas(pagina) -> list[list[list[str]]]:
         inicio_coluna = {c: caixa.x0 for linha in caixas for c, caixa in enumerate(linha) if caixa}
         inicio_linha = {r: next((c.y0 for c in linha if c), None) for r, linha in enumerate(caixas)}
         textos = [[texto_da_caixa(c) if c else None for c in linha] for linha in caixas]
-        # célula vazia (None) = coberta por uma célula fundida. Se a fusão é vertical,
-        # repete-se o texto de cima (ex.: "1º Ciclo" para o 1.º, 2.º, 3.º e 4.º ano)
         for r, linha in enumerate(caixas):
             for c, caixa in enumerate(linha):
                 if caixa is not None:
@@ -199,7 +166,6 @@ def _grelhas(pagina) -> list[list[list[str]]]:
 
 
 def _grelha_markdown(linhas: list[list]) -> str:
-    """Tabela (lista de linhas de células) em markdown; células fundidas vêm vazias."""
     linhas = [[re.sub(r"\s+", " ", c or "").strip().replace("|", "/") for c in linha] for linha in linhas]
     if not linhas:
         return ""
@@ -208,8 +174,8 @@ def _grelha_markdown(linhas: list[list]) -> str:
     if not linhas or len(colunas) < 2:
         return ""
     md = []
-    if len(linhas) > 1 and sum(bool(c) for c in linhas[0]) == 1:  # 1.ª linha = título da tabela
-        md.append(f"**{next(c for c in linhas[0] if c)}**")  # sem linha em branco: fica com a tabela
+    if len(linhas) > 1 and sum(bool(c) for c in linhas[0]) == 1:
+        md.append(f"**{next(c for c in linhas[0] if c)}**")
         linhas = linhas[1:]
     md.append("|" + "|".join(linhas[0]) + "|")
     md.append("|" + "---|" * len(colunas))
@@ -217,19 +183,15 @@ def _grelha_markdown(linhas: list[list]) -> str:
     return "\n".join(md)
 
 
-# ---------------------------------------------------------------- limpeza
-
 def _limpar_markdown(markdown: str) -> str:
-    # alguns PDFs guardam "ç" como "c" + cedilha separada: junta-os ("Subsecção")
     markdown = unicodedata.normalize("NFC", markdown)
-    # texto dentro de imagens/esquemas (ex.: organograma): fica, mas assinalado
     markdown = re.sub(r"<!--\s*Start of picture text\s*-->(.*?)<!--\s*End of picture text\s*-->",
                       lambda m: "\n\n*[Texto de uma imagem ou esquema; a ordem pode não ser a original]:* "
                                 + m.group(1).replace("<br>", " · ").strip(" ·") + "\n\n",
                       markdown, flags=re.S)
     markdown = re.sub(r"<!--.*?-->|^==> picture .* <==$", "", markdown, flags=re.S | re.M)
-    markdown = markdown.replace("­", "")  # hífen invisível
-    markdown = re.sub(r"\s*‑\s*", "-", markdown)  # hífen não separável ("pré ‑ escolar")
+    markdown = markdown.replace("­", "")
+    markdown = re.sub(r"\s*‑\s*", "-", markdown)
     return markdown
 
 
@@ -241,7 +203,6 @@ _RE_ESTRUTURA = re.compile(r"^(cap[ií]tulo|sec[cç][aã]o|subsec[cç][aã]o|art
 
 
 def _sem_cabecalhos_rodapes(paginas: list[str]) -> list[str]:
-    """Retira linhas que se repetem no topo/fundo de muitas páginas e os números de página."""
     def margens(markdown):
         linhas = [l for l in markdown.split("\n") if l.strip()]
         return linhas[:2] + linhas[-2:]
@@ -249,11 +210,9 @@ def _sem_cabecalhos_rodapes(paginas: list[str]) -> list[str]:
     contagem = Counter()
     for markdown in paginas:
         contagem.update({_chave(l) for l in margens(markdown)})
-    # os números são trocados por "#" ("Página # de #"); por isso, títulos como
-    # "Artigo #.º" também podem parecer repetidos e nunca contam como rodapé
     repetidas = {c for c, n in contagem.items()
                  if c and n >= max(3, 0.5 * len(paginas)) and not _RE_ESTRUTURA.match(c)}
-    repetidas.add("#")  # número de página sozinho
+    repetidas.add("#")
 
     resultado = []
     for markdown in paginas:
@@ -264,7 +223,6 @@ def _sem_cabecalhos_rodapes(paginas: list[str]) -> list[str]:
 
 
 def _titulo(pagina) -> str:
-    """Título da capa: a linha mais curta entre as de letra maior ("REGULAMENTO INTERNO")."""
     linhas = []
     for bloco in pagina.get_text("dict")["blocks"]:
         for linha in bloco.get("lines", []):
@@ -280,8 +238,6 @@ def _titulo(pagina) -> str:
                     for i, p in enumerate(titulo.lower().split()))
 
 
-# ---------------------------------------------------------------- elementos
-
 def _e_titulo(bloco: str) -> bool:
     if not bloco or "\n" in bloco or len(bloco) > 250 or bloco.startswith("|"):
         return False
@@ -293,7 +249,7 @@ def _e_titulo(bloco: str) -> bool:
 def _elementos_da_pagina(numero: int, markdown: str) -> list[dict]:
     linhas = [l for l in markdown.split("\n") if l.strip()]
     if linhas and sum(bool(_RE_INDICE.search(texto_simples(l))) for l in linhas) >= 0.4 * len(linhas):
-        return []  # página de índice: só repete os títulos, sem conteúdo
+        return []
     elementos = []
     for bloco in re.split(r"\n\s*\n", markdown):
         bloco = "\n".join(l.rstrip() for l in bloco.strip("\n").split("\n")
@@ -316,18 +272,14 @@ _LIGACOES = {"de", "da", "do", "das", "dos", "e", "a", "o", "na", "no", "nas", "
 
 
 def _titulo_continua(anterior: str, seguinte: str) -> bool:
-    """Título partido em duas linhas: "... Ultrapassagem dos" + "limites de Faltas",
-    "Secção V — ... e Manuais" + "Escolares"."""
     ultima = anterior.split()[-1].lower() if anterior.split() else ""
     if ultima in _LIGACOES or seguinte[:1].islower():
         return True
-    # numa secção/subsecção com nome, uma palavra solta na linha seguinte é o resto do nome
     return (bool(re.match(r"(?i)(sub)?sec[çc][ãa]o\s+\S+\s*[—–-]\s*\S", anterior))
             and len(seguinte.split()) == 1 and not seguinte.startswith("("))
 
 
 def _juntar_entre_paginas(elementos: list[dict]) -> list[dict]:
-    """Junta títulos partidos em duas linhas e parágrafos partidos pelo fim da página."""
     resultado = []
     for el in elementos:
         anterior = resultado[-1] if resultado else None
@@ -345,16 +297,10 @@ def _juntar_entre_paginas(elementos: list[dict]) -> list[dict]:
     return resultado
 
 
-# ---------------------------------------------------------------- imagem
-
 def imagem_pagina(caminho, pagina: int, destacar: str = "", zoom: float = 1.6) -> bytes:
-    """Desenha a página como PNG, com o texto `destacar` marcado a amarelo."""
     with pymupdf.open(caminho) as doc:
         pag = doc[pagina - 1]
-        # procura frase a frase (frases inteiras costumam ser únicas na página)
         for frase in re.split(r"(?<=[.!?;:])\s+|\n", texto_simples(destacar)):
-            # o hífen pode estar guardado de outra forma no PDF: tenta também
-            # os pedaços entre hífenes, do maior para o menor
             for pedaco in [frase] + sorted(frase.split("-"), key=len, reverse=True)[:2]:
                 pedaco = pedaco.strip()
                 if len(pedaco) < 20:

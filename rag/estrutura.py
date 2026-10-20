@@ -1,18 +1,11 @@
-"""Organiza os elementos de um PDF em secções e divide-as em trechos.
-
-Num regulamento cada secção é um artigo ("Artigo 120.º (Medidas de
-Recuperação e de Integração)"), com o capítulo, a secção e a subsecção a que
-pertence. Nos outros documentos as secções são definidas pelos títulos.
-"""
-
 import re
 
 from .texto import texto_simples
 
-TAMANHO_TRECHO = 1800  # caracteres (aprox.) de cada trecho
+TAMANHO_TRECHO = 1800
 
 _NUMERAL = r"[IVXLC]+|\d+"
-_ESTRUTURA = [  # (nível, tipo, regex aplicada ao título)
+_ESTRUTURA = [
     (1, "capitulo", re.compile(rf"^cap[íi]tulo\s+({_NUMERAL})\b\s*[-–—.:]?\s*(.*)$", re.I)),
     (2, "seccao", re.compile(rf"^sec[çc][ãa]o\s+({_NUMERAL})\b\s*[-–—.:]?\s*(.*)$", re.I)),
     (3, "subseccao", re.compile(rf"^subsec[çc][ãa]o\s+({_NUMERAL})\b\s*[-–—.:]?\s*(.*)$", re.I)),
@@ -21,10 +14,9 @@ _ESTRUTURA = [  # (nível, tipo, regex aplicada ao título)
 
 
 def _estrutura(titulo: str):
-    """(nível, tipo, número, resto do título) se for capítulo/secção/artigo; senão None."""
     for nivel, tipo, regex in _ESTRUTURA:
         m = regex.match(titulo)
-        if m and tipo == "artigo":  # "58.º-A" fica "58-A"
+        if m and tipo == "artigo":
             return nivel, tipo, m.group(1) + (m.group(2) or "").replace(" ", "").upper(), m.group(3)
         if m:
             return nivel, tipo, m.group(1).upper(), m.group(2)
@@ -32,7 +24,6 @@ def _estrutura(titulo: str):
 
 
 def _completa_titulo(secao: dict, el: dict, texto: str) -> bool:
-    """O elemento é o nome do título anterior? ("Artigo 39.º" + "(Definição)")"""
     if secao["tipo"] == "artigo":
         return len(texto) < 250 and texto.startswith("(") and texto.endswith(")")
     if secao["tipo"] in ("capitulo", "seccao", "subseccao"):
@@ -41,7 +32,7 @@ def _completa_titulo(secao: dict, el: dict, texto: str) -> bool:
 
 
 def construir_secoes(nome: str, elementos: list[dict]) -> list[dict]:
-    secoes, pilha = [], []  # pilha: [(nível, rótulo)] dos títulos onde estamos
+    secoes, pilha = [], []
     atual = None
 
     def abrir(nivel, rotulo, el, tipo, artigo=None, completo=True):
@@ -68,8 +59,6 @@ def construir_secoes(nome: str, elementos: list[dict]) -> list[dict]:
                 abrir(nivel, texto, el, tipo, artigo=numero if tipo == "artigo" else None,
                       completo=bool(resto.strip()))
                 continue
-            # legendas ("Mobilidades de alunos:") e subtítulos dentro de um
-            # artigo ficam como texto da secção onde estão
             if (not atual or atual["tipo"] != "artigo") and not texto.endswith(":"):
                 abrir(2 if texto.isupper() else 3, texto, el, "titulo")
                 continue
@@ -85,7 +74,6 @@ def formatar_elemento(el: dict) -> str:
 
 
 def _dividir_tabela(el: dict) -> list[dict]:
-    """Divide uma tabela grande em partes, repetindo o cabeçalho em cada uma."""
     linhas = el["texto"].split("\n")
     separador = next((i for i, l in enumerate(linhas) if re.fullmatch(r"\|(\s*:?-+:?\s*\|)+\s*", l)), None)
     if not separador:
@@ -102,7 +90,6 @@ def _dividir_tabela(el: dict) -> list[dict]:
 
 
 def dividir_em_trechos(secao: dict) -> list[dict]:
-    """Divide a secção em trechos de ~TAMANHO_TRECHO, sem partir parágrafos."""
     pedacos = []
     for el in secao["elementos"]:
         grande = el["tipo"] == "tabela" and len(el["texto"]) > TAMANHO_TRECHO
