@@ -11,7 +11,7 @@ from .texto import texto_simples, tokenizar
 RAIZ = Path(__file__).resolve().parent.parent
 PASTA_DOCUMENTOS = RAIZ / "documentos"
 FICHEIRO_INDICE = RAIZ / "dados" / "indice.json"
-VERSAO = 2
+VERSAO = 3
 
 K1, B = 1.5, 0.75
 
@@ -56,7 +56,7 @@ def sincronizar(pasta: Path = PASTA_DOCUMENTOS, ficheiro: Path = FICHEIRO_INDICE
             lido, erro = {}, str(e)
         except Exception:
             lido, erro = {}, "ficheiro danificado ou não é um PDF válido"
-        documentos[nome] = {"titulo": "", "num_paginas": 0, "elementos": [], "avisos": [],
+        documentos[nome] = {"titulo": "", "num_paginas": 0, "elementos": [], "avisos": [], "paginas_ocr": [],
                             **lido, "assinatura": assinatura, "erro": erro}
         mudou = True
 
@@ -127,6 +127,10 @@ class Indice:
 
     def num_paginas(self, nome: str) -> int:
         return self.documentos[nome].get("num_paginas", 0)
+
+    def lido_por_ocr(self, fonte: dict) -> bool:
+        return any(fonte["pagina"] <= p <= fonte["pagina_fim"]
+                   for p in self.documentos.get(fonte["documento"], {}).get("paginas_ocr", []))
 
     def documentos_mencionados(self, texto: str) -> list[str]:
         termos = set(tokenizar(texto))

@@ -17,6 +17,8 @@ if __name__ == "__main__":
             continue
         print(f"{indice.titulo(nome)} ({nome}): {doc['num_paginas']} páginas, "
               f"{secoes[nome]} secções, {artigos[nome]} artigos")
+        if doc.get("paginas_ocr"):
+            print(f"  OCR nas páginas: {', '.join(map(str, doc['paginas_ocr']))}")
         for aviso in doc.get("avisos", []):
             print(f"  aviso: {aviso}")
     print(f"Pronto: {len(indice.trechos)} trechos para pesquisa.")

@@ -204,7 +204,7 @@ def recolher_fontes(indice: Indice, pergunta: str, plano: dict, k: int = 6, filt
                 continue
             break
         vistos.add(fonte["id"])
-        fontes.append({**fonte, "titulo_doc": indice.titulo(fonte["documento"])})
+        fontes.append({**fonte, "titulo_doc": indice.titulo(fonte["documento"]), "ocr": indice.lido_por_ocr(fonte)})
         total += len(fonte["texto"])
     return fontes
 
@@ -219,7 +219,8 @@ def _cabecalho_fonte(n: int, fonte: dict) -> str:
     if fonte.get("partes", 1) > 1:
         rotulo += f" (parte {fonte['parte']} de {fonte['partes']})"
     partes.append(rotulo)
-    return " › ".join(partes) + f" — {paginas}"
+    ocr = " (texto lido por OCR, pode ter erros de leitura)" if fonte.get("ocr") else ""
+    return " › ".join(partes) + f" — {paginas}{ocr}"
 
 
 def responder(cliente, modelo: str, pergunta: str, fontes: list[dict], historico: list[dict],

@@ -66,7 +66,7 @@ O HNCHBOT é um assistente de documentos feito em Python e Streamlit. O professo
 4. confirma que todo o texto que a resposta põe entre aspas existe mesmo nas fontes, e avisa quando não existe;
 5. mostra as fontes usadas e permite abrir a página original do PDF com o trecho destacado a amarelo.
 
-O chatbot **não usa conhecimento externo**: se a resposta não estiver nos documentos, diz *"Não encontrei essa informação nos documentos."* em vez de inventar. Funciona com quaisquer PDFs colocados na pasta `documentos/`, mas foi afinado e testado com os dois documentos do agrupamento.
+O chatbot **não usa conhecimento externo**: se a resposta não estiver nos documentos, diz *"Não encontrei essa informação nos documentos."* em vez de inventar. Funciona com quaisquer PDFs colocados na pasta `documentos/`, incluindo PDFs digitalizados e texto dentro de imagens (lidos com OCR), mas foi afinado e testado com os dois documentos do agrupamento.
 
 ---
 
@@ -75,6 +75,7 @@ O chatbot **não usa conhecimento externo**: se a resposta não estiver nos docu
 | Componente / Funcionalidade | Descrição | Estado |
 |-----------------------------|-----------|--------|
 | 📄 **Leitura precisa dos PDFs** | `pymupdf4llm` com análise de layout (`pymupdf-layout`): parágrafos, títulos, listas (`1 —`, `a)`) e tabelas em markdown, com limpeza de cabeçalhos, rodapés, índices e palavras coladas. | ✅ Concluído |
+| 🖼️ **Texto em imagens (OCR)** | PDFs digitalizados e texto dentro de imagens (avisos, citações, esquemas, capturas de ecrã, botões no meio do texto) são lidos com OCR em português, com o Tesseract que vem no PyMuPDF. Só entra o texto que passa um filtro de qualidade: logótipos repetidos, fotografias e nuvens de palavras são descartados. As páginas e as fontes lidas por OCR ficam assinaladas. | ✅ Concluído |
 | 🧱 **Estrutura em artigos** | O Regulamento Interno fica dividido nos 274 artigos (o 58.º existe como 58.º-A e 58.º-B), cada um com capítulo, secção e subsecção. O Projeto Educativo fica dividido pelos títulos. | ✅ Concluído |
 | 🔎 **Pesquisa BM25 em português** | Pesquisa por palavras sem embeddings (a Groq não os tem), com normalização de acentos, plurais e género e palavras comuns ignoradas. | ✅ Concluído |
 | 🗺️ **Mapa dos documentos para a IA** | Um modelo pequeno escolhe capítulos e secções num mapa compacto (116 grupos, ~2 200 tokens) e sugere palavras-chave como estariam escritas nos documentos. | ✅ Concluído |
@@ -87,6 +88,7 @@ O chatbot **não usa conhecimento externo**: se a resposta não estiver nos docu
 | 🎛️ **Filtros e definições** | Pesquisar só em alguns documentos, escolher o modelo, o número de trechos (3 a 10) e a temperatura. | ✅ Concluído |
 | 🧪 **Bateria de 62 perguntas** | Perguntas com respostas tiradas dos PDFs reais: verifica fontes, factos, pesquisa sem IA e citações. | 🔨 Em curso (falta uma volta completa com o código final) |
 | 🧩 **Artigos que remetem para outras alíneas** | Respostas que estão num número que só diz *"o disposto na alínea r)"* (ex.: sanções pelo uso do telemóvel). | 📋 Planeado |
+| 🧠 **Descrição de gráficos e esquemas** | Um modelo com visão (o `qwen/qwen3.8-27b` da Groq aceita imagens) descreve gráficos, esquemas e fotografias, que o OCR só lê palavra a palavra. | 📋 Planeado |
 | 🎨 **Aparência da interface** | Melhorar o aspeto visual da app. | 📋 Planeado |
 
 ---
@@ -103,6 +105,7 @@ O chatbot **não usa conhecimento externo**: se a resposta não estiver nos docu
 | `qwen/qwen3.8-27b` | Modelo de reserva quando o limite do anterior acaba |
 | PyMuPDF | Abertura dos PDFs, grelhas das tabelas, palavras de cada página, imagens das páginas |
 | pymupdf4llm + pymupdf-layout | Conversão das páginas em markdown com análise de layout |
+| Tesseract (incluído no PyMuPDF) | OCR em português de páginas digitalizadas e de texto dentro de imagens, com o modelo `tessdata/por.traineddata` |
 | BM25 (implementação própria) | Pesquisa por palavras nos trechos, adaptada ao português |
 | python-dotenv | Leitura da chave da Groq a partir do ficheiro `.env` |
 | JSON (`dados/indice.json`) | Cache dos PDFs já lidos, para o chatbot abrir logo |
@@ -111,27 +114,28 @@ O chatbot **não usa conhecimento externo**: se a resposta não estiver nos docu
 
 ## 📄 Leitura dos documentos
 
-Para responder com precisão, o mais importante é ler bem os PDFs. Cada PDF é lido uma única vez (cerca de 1 minuto por cada 150 páginas) e o resultado fica guardado em `dados/indice.json`. Só volta a ser lido se o ficheiro mudar (tamanho ou data de modificação).
+Para responder com precisão, o mais importante é ler bem os PDFs. Cada PDF é lido uma única vez (cerca de 1 minuto por cada 150 páginas; as páginas que precisam de OCR demoram alguns segundos cada) e o resultado fica guardado em `dados/indice.json`. Só volta a ser lido se o ficheiro mudar (tamanho ou data de modificação).
 
 | Passo | O que acontece |
 |-------|----------------|
 | **1. Texto e layout** | O `pymupdf4llm`, com a análise de layout do `pymupdf-layout`, converte cada página em markdown: junta as linhas em parágrafos e reconhece títulos, listas e tabelas. As páginas são lidas em lotes de 10 para mostrar o progresso. |
-| **2. Palavras coladas** | Palavras que o PDF juntou (ex.: *"residenteporgrandesgrupos"*) são separadas com base nas palavras que existem mesmo na página. |
-| **3. Tabelas** | Se uma tabela sai com palavras partidas entre células (cabeçalhos na vertical, células fundidas), é trocada pela leitura da grelha da própria tabela. As células fundidas na vertical repetem o rótulo (ex.: *"1.º Ciclo"* em cada ano). |
-| **4. Limpeza** | Saem os cabeçalhos e rodapés repetidos (*"Regulamento Interno AEHN · Página 80 de 160"*) e as páginas de índice (*"Artigo 3.º (Objetivos) ........ 18"*). Títulos e parágrafos partidos pelo fim da linha ou da página são juntados. |
-| **5. Estrutura** | Os títulos *Capítulo*, *Secção*, *Subsecção* e *Artigo* formam a hierarquia. O nome do artigo que vem na linha seguinte (*"(Definição)"*) junta-se ao título. Nos outros documentos, as secções são definidas pelos títulos. |
-| **6. Trechos** | Cada secção é dividida em trechos de ~1 800 caracteres sem partir parágrafos. As tabelas grandes são divididas por linhas e repetem o cabeçalho em cada parte. Trechos quase vazios (ex.: a capa) não entram na pesquisa. |
-| **7. Verificação** | As palavras lidas são comparadas com as do PDF. Se faltarem 5 ou mais palavras numa página, aparece um aviso na barra lateral e no `indexar.py`. |
+| **2. OCR** | Antes da conversão, as imagens de cada página são lidas com OCR em português a 300 dpi, sem o texto nativo da página: nas páginas digitais, cada imagem com pelo menos 24 × 8 pt (o que inclui botões no meio do texto) é lida em separado, e imagens sobrepostas (uma janela por cima de outra) são juntas numa só zona; nas páginas digitalizadas (menos de 20 palavras nativas), a página inteira. As imagens que se repetem em metade ou mais das páginas (logótipos e fotografias de cabeçalho e rodapé) são ignoradas. Cada linha lida tem de ter pelo menos 75% de palavras plausíveis (letras ou números, sem misturas como *"ooNesORA"* ou *"4r4"*) e cada imagem pelo menos 70% de linhas plausíveis; o resto é descartado. As linhas aceites entram na página como texto invisível e seguem os passos seguintes. O título do documento é lido antes do OCR. |
+| **3. Palavras coladas** | Palavras que o PDF juntou (ex.: *"residenteporgrandesgrupos"*) são separadas com base nas palavras que existem mesmo na página. |
+| **4. Tabelas** | Se uma tabela sai com palavras partidas entre células (cabeçalhos na vertical, células fundidas), é trocada pela leitura da grelha da própria tabela. As células fundidas na vertical repetem o rótulo (ex.: *"1.º Ciclo"* em cada ano). |
+| **5. Limpeza** | Saem os cabeçalhos e rodapés repetidos (*"Regulamento Interno AEHN · Página 80 de 160"*) e as páginas de índice (*"Artigo 3.º (Objetivos) ........ 18"*). Títulos e parágrafos partidos pelo fim da linha ou da página são juntados. |
+| **6. Estrutura** | Os títulos *Capítulo*, *Secção*, *Subsecção* e *Artigo* formam a hierarquia. O nome do artigo que vem na linha seguinte (*"(Definição)"*) junta-se ao título. Nos outros documentos, as secções são definidas pelos títulos. |
+| **7. Trechos** | Cada secção é dividida em trechos de ~1 800 caracteres sem partir parágrafos. As tabelas grandes são divididas por linhas e repetem o cabeçalho em cada parte. Trechos quase vazios (ex.: a capa) não entram na pesquisa. |
+| **8. Verificação** | As palavras lidas são comparadas com as do PDF. Se faltarem 5 ou mais palavras numa página, aparece um aviso na barra lateral e no `indexar.py`. |
 
 **Resultado atual da leitura:**
 
 | Documento | Páginas | Secções | Artigos | Trechos |
 |-----------|---------|---------|---------|---------|
 | Regulamento Interno (`regulamento-interno-aehn_2025.pdf`) | 160 | 277 | 275 secções de artigo (1.º a 274.º, com 58.º-A e 58.º-B) | 346 |
-| Projeto Educativo (`pe-22_25_vdefinitiva.pdf`) | 24 | 22 | — | 32 |
-| **Total** | **184** | **299** | | **378** |
+| Projeto Educativo (`pe-22_25_vdefinitiva.pdf`) | 24 | 22 | — | 33 |
+| **Total** | **184** | **299** | | **379** |
 
-Foram reconhecidas 25 tabelas. O único aviso de leitura é a página 4 do Projeto Educativo, onde as fórmulas da TPS e da TCD estão em imagem (a explicação em texto é lida).
+Foram reconhecidas 25 tabelas e não há avisos de leitura (com o PyMuPDF 2.0, as fórmulas da TPS e da TCD da página 4 do Projeto Educativo passaram a ser lidas). O OCR acrescentou texto em 4 páginas do Projeto Educativo: a citação da página 5, os projetos da página 6, os departamentos do organograma da página 14 e o esquema da missão da página 18. A capa (nuvem de palavras), as fotografias e o mapa foram lidos, mas o filtro descartou-os. O Regulamento Interno não tem imagens com texto.
 
 ---
 
@@ -282,9 +286,33 @@ Nos testes, o verificador apanhou um caso real: o modelo citou entre aspas *"san
 ```bash
 python testes/avaliar.py            # todas (~35 min, por causa do limite por minuto da Groq)
 python testes/avaliar.py 1 2 3      # só algumas
+python testes/testar_imagens.py     # leitura de imagens com OCR (~15 s, sem Groq)
+python testes/verificar_leitura.py  # texto + imagens de todos os PDFs de documentos/ (sem Groq)
+python testes/verificar_leitura.py C:\pasta\com\pdfs   # ou de outra pasta
 ```
 
 As respostas completas, as fontes e as citações não encontradas ficam em `dados/avaliacao.json`. Se o limite diário da Groq acabar a meio, a bateria pára e mostra o resumo do que já fez.
+
+`testes/testar_imagens.py` cria 7 PDFs de teste (aviso em imagem numa página com texto, documento digitalizado, gráfico em imagem, esquema desenhado com texto, botão em imagem no meio de uma frase, captura de ecrã numa página com muito texto e logótipo repetido em todas as páginas) e confirma que o texto de cada um é lido, que o logótipo repetido é ignorado, que o *Ver no PDF* destaca o trecho numa página digitalizada e que o filtro do OCR aceita e rejeita as linhas certas (com exemplos tirados do OCR real do Projeto Educativo). Não usa a Groq e termina com código 1 se alguma verificação falhar.
+
+`testes/verificar_leitura.py` verifica PDFs reais (por defeito, os de `documentos/`). Para cada PDF, lê-o como a app e confirma duas coisas:
+
+- **Texto nativo:** pelo menos 97% das palavras do PDF estão no índice. Não contam os cabeçalhos e rodapés repetidos nem as linhas do índice, que a leitura retira de propósito.
+- **Imagens:** cada imagem é lida outra vez com OCR, independentemente da leitura. Se o filtro de qualidade aceita o texto dela, pelo menos 80% desse texto tem de estar no índice da página.
+
+Mostra também quantas imagens não tinham texto legível e quantas foram ignoradas por se repetirem. Não usa a Groq e termina com código 1 se algum PDF falhar.
+
+**Validação com manuais reais (27/10/2026).** A leitura de imagens foi validada com 24 manuais de utilizador da plataforma Inovar Alunos: 192 páginas cheias de capturas de ecrã e de botões em imagem no meio do texto. Os manuais não estão no repositório, porque têm direitos reservados. Na primeira versão do OCR, quem decidia que páginas ler era o `pymupdf4llm`, que só lia imagens com pelo menos 2% da página: o OCR nem corria em 13 dos 24 manuais e a maioria das capturas ficava de fora. Com a versão atual:
+
+| Medida | Resultado |
+|--------|-----------|
+| `testes/verificar_leitura.py` | 24/24 PDFs sem falhas (e o PE e o RI também) |
+| Texto nativo no índice | 100% em todos os manuais |
+| Imagens lidas | 116, em 70 páginas |
+| Imagens sem texto legível | 160 (ícones, fotografias e capturas com letra pequena ou de baixa resolução) |
+| Imagens repetidas ignoradas | 461 (logótipos e fotografias de cabeçalho e rodapé) |
+| Perguntas cuja resposta só está nas imagens (só pesquisa BM25) | página certa em 7/8 com OCR, contra 2/8 sem OCR |
+| As mesmas perguntas com a Groq (2 testadas) | 2/2 respondidas com a informação da captura de ecrã |
 
 ### Resultados
 
@@ -293,6 +321,8 @@ As respostas completas, as fontes e as citações não encontradas ficam em `dad
 | 18/10/2026 | 23 perguntas iniciais | 23/23 | 23/23 (22/23 antes de corrigir um teste demasiado estrito) | — | — | — |
 | 20/10/2026, 1.ª volta | antes das correções | 59/62 | **56/62** (23/23 das iniciais) | 52/62 | 65 | 1 (falso aviso, corrigido) |
 | 20/10/2026, 2.ª volta | com as correções | 19/20 corridas | **19/20** corridas | 16/20 | 45 | 1 (citação no plural) |
+| 27/10/2026, amostra | PyMuPDF 2.0, sem OCR | 4/4 corridas (1, 13, 17, 21) | **4/4** | 4/4 | 12 | 1 (erro real do modelo: *"respetado"* em vez de *"respetivo"*) |
+| 27/10/2026, amostra | com OCR (versão final) | 4/4 corridas (1, 14, 17, 22) | **4/4** | 4/4 | 8 | 0 |
 
 A 2.ª volta repetiu as 6 perguntas que falharam (5 passaram a certas) e as perguntas 1 a 14 (14/14). Parou na pergunta 15 porque acabou o limite diário de tokens da Groq.
 
@@ -319,10 +349,12 @@ A 2.ª volta repetiu as 6 perguntas que falharam (5 passaram a certas) e as perg
 | 18/10/2026 | **Leitura precisa do Regulamento Interno e do Projeto Educativo** | `pymupdf4llm` + `pymupdf-layout`; tabelas reconstruídas pela grelha; limpeza de cabeçalhos, rodapés, índices e palavras coladas; divisão nos 274 artigos com capítulo, secção e subsecção; *"artigo N"* e *"página N"* trazem o texto inteiro; mapa compacto para a IA escolher secções; primeira bateria de 23 perguntas (23/23). |
 | 20/10/2026 | **Fiabilidade das respostas** | Verificação de citações com aviso na app; bateria alargada para 62 perguntas; correções na preparação da pesquisa e nas instruções de resposta; mensagem própria para o limite diário da Groq; resultados guardados em `dados/avaliacao.json`. |
 | 20/10/2026 | **Limpeza e documentação** | Código sem comentários nem emojis, ficheiros de configuração simplificados, logótipo do agrupamento e este README. |
+| 27/10/2026 | **Leitura de imagens (OCR)** | OCR em português com o Tesseract do PyMuPDF (modelo em `tessdata/`), feito pelo próprio projeto antes da conversão: cada imagem a partir de 24 × 8 pt nas páginas digitais (incluindo botões), a página inteira nas digitalizadas, sem logótipos repetidos e com imagens sobrepostas juntas; filtro de qualidade por linha e por imagem; título do documento lido antes do OCR; páginas e fontes lidas por OCR assinaladas na app e para o modelo; *Ver no PDF* com destaque em páginas digitalizadas; testes `testes/testar_imagens.py` e `testes/verificar_leitura.py`, validados com 24 manuais com capturas de ecrã; PyMuPDF 2.0. |
 
 ### Onde estamos
 
-- A leitura dos dois documentos está estável: 378 trechos, 25 tabelas e só um aviso de leitura (fórmulas em imagem na página 4 do PE).
+- A leitura dos dois documentos está estável: 379 trechos, 25 tabelas e nenhum aviso de leitura.
+- PDFs digitalizados e texto dentro de imagens já são lidos com OCR (no PE: a citação da página 5, os projetos da página 6 e o esquema da página 18). Gráficos e esquemas são lidos palavra a palavra, sem o significado.
 - Das 62 perguntas, 56 estavam certas antes das correções; com as correções, todas as que foram repetidas estão certas exceto a 38.
 - Falta repetir as perguntas 15 a 62 com o código final. A bateria completa gasta quase todo o limite diário gratuito da Groq, por isso só se pode correr uma vez por dia.
 - A interface funciona, mas o aspeto visual ainda não foi trabalhado.
@@ -332,7 +364,8 @@ A 2.ª volta repetiu as 6 perguntas que falharam (5 passaram a certas) e as perg
 1. Correr a bateria completa com o código final quando o limite diário da Groq recuperar.
 2. Resolver a pergunta 38: quando um trecho de um artigo é escolhido, trazer também os outros números do mesmo artigo, sem tirar lugar às fontes de outros artigos. Uma primeira experiência resolveu a pergunta 25 mas, com um plano mau, tirava a fonte certa da pergunta 11, por isso não ficou.
 3. Mudar automaticamente de modelo de resposta quando o `gpt-oss-120b` atinge o limite diário.
-4. Trabalhar a aparência da interface.
+4. Descrever gráficos, esquemas e fotografias com um modelo com visão (o `qwen/qwen3.8-27b` da Groq aceita imagens) e guardar a descrição no índice.
+5. Trabalhar a aparência da interface.
 
 ---
 
@@ -341,6 +374,7 @@ A 2.ª volta repetiu as 6 perguntas que falharam (5 passaram a certas) e as perg
 - Python 3.10 ou superior
 - Uma conta na [Groq](https://console.groq.com) e uma chave da API (o plano gratuito chega para a demonstração)
 - Os PDFs a consultar (os documentos do agrupamento não estão no repositório)
+- Nada a instalar para o OCR: o motor do Tesseract vem no PyMuPDF e o modelo de português está em `tessdata/`
 - Windows para o arranque com duplo clique (`iniciar.bat`); noutros sistemas, a instalação manual
 
 ---
@@ -382,6 +416,12 @@ streamlit run app.py
 ```
 
 Sem chave da Groq, o chatbot funciona em modo de pesquisa: mostra os trechos e as páginas encontrados, mas não escreve respostas.
+
+Se o ambiente virtual foi criado antes de 27/10/2026, atualiza as dependências, porque o OCR precisa do PyMuPDF 2.0 (o `iniciar.bat` só as instala da primeira vez):
+
+```bash
+.venv\Scripts\python.exe -m pip install -U -r requirements.txt
+```
 
 ---
 
@@ -425,13 +465,18 @@ HNCHBOT/
 ├── assets/
 │   └── logo.svg                # Logótipo do Agrupamento de Escolas Henriques Nogueira
 ├── rag/
-│   ├── pdfs.py                 # Leitura dos PDFs: markdown, tabelas, limpeza, verificação
+│   ├── pdfs.py                 # Leitura dos PDFs: markdown, OCR, tabelas, limpeza, verificação
 │   ├── estrutura.py            # Divisão em capítulos, secções, artigos e trechos
 │   ├── indice.py               # Cache em dados/, pesquisa BM25, mapa dos documentos
 │   ├── texto.py                # Português: acentos, plurais, "página 12", "artigo 58.º-A"
 │   └── assistente.py           # Groq: preparar a pesquisa, escolher fontes, responder, verificar citações
+├── tessdata/
+│   ├── por.traineddata         # Modelo de OCR em português (tessdata_fast do Tesseract)
+│   └── LICENSE                 # Licença do modelo (Apache 2.0)
 ├── testes/
-│   └── avaliar.py              # Bateria de 62 perguntas com respostas verificadas
+│   ├── avaliar.py              # Bateria de 62 perguntas com respostas verificadas
+│   ├── testar_imagens.py       # Leitura de imagens com OCR, com PDFs de teste (sem Groq)
+│   └── verificar_leitura.py    # Verifica texto + imagens de PDFs reais (sem Groq)
 ├── exemplos/
 │   └── gerar_pdfs_exemplo.py   # Cria 3 PDFs de exemplo de Físico-Química
 ├── documentos/                 # PDFs a consultar (não vão para o repositório)
@@ -474,7 +519,7 @@ flowchart TD
   G --> V["Verificação de citações"]
   V --> UI["Resposta + avisos + fontes"]
   UI --> PDF["Ver no PDF (trecho destacado)"]
-  PDFS["documentos/*.pdf"] --> L["Leitura: pymupdf4llm + layout"]
+  PDFS["documentos/*.pdf"] --> L["Leitura: pymupdf4llm + layout + OCR filtrado"]
   L --> E["Artigos, secções e trechos"]
   E --> I["dados/indice.json"]
   I --> B
@@ -504,8 +549,9 @@ flowchart TD
 - [ ] Volta completa da bateria com o código final
 - [ ] Artigos com remissões internas (pergunta 38)
 - [ ] Mudança automática de modelo quando o limite diário acaba
-- [ ] Texto dentro de imagens (citação da página 5 do PE, organograma, fórmulas da página 4)
-- [ ] OCR para PDFs digitalizados
+- [x] Texto dentro de imagens com OCR filtrado (citação da página 5 do PE, fórmulas da página 4)
+- [x] OCR para PDFs digitalizados
+- [ ] Descrição de gráficos, esquemas e fotografias com um modelo com visão
 - [ ] Aparência da interface
 
 ---
@@ -517,8 +563,8 @@ flowchart TD
 - **Remissões dentro de um artigo** — quando a resposta está num número que só remete para outra alínea (*"o disposto na alínea r)"*), a pesquisa pode não o encontrar (pergunta 38).
 - **Preparação da pesquisa variável** — o modelo pequeno nem sempre escolhe as mesmas secções para a mesma pergunta; os bónus na pesquisa podem favorecer secções erradas quando a escolha é má.
 - **Palavras da mesma família** — a redução de palavras trata plurais e género, mas *"justificar"* e *"justificação"* continuam a ser palavras diferentes para a pesquisa.
-- **Imagens** — o texto dentro de imagens não é lido (a citação da página 5 do Projeto Educativo, as fórmulas da TPS e da TCD na página 4). Do organograma só se aproveitam os nomes das caixas, sem a hierarquia.
-- **PDFs digitalizados** — fotografias ou scans não têm texto; o chatbot avisa na barra lateral. Precisam de OCR primeiro (por exemplo com o `ocrmypdf`).
+- **Imagens** — o texto dentro de imagens é lido com OCR, mas só quando a leitura é limpa: logótipos repetidos, fotografias, mapas e nuvens de palavras são descartados, tal como capturas de ecrã com letra muito pequena ou de baixa resolução (o OCR delas sai ilegível), e o texto de esquemas sai pela ordem do OCR, por vezes com palavras coladas. Imagens perto do limite de qualidade podem entrar ou não conforme pequenas diferenças na leitura. O OCR lê as palavras, não o significado: num gráfico perde-se que valor pertence a que ano, e do organograma só se aproveitam os nomes das caixas, sem a hierarquia.
+- **PDFs digitalizados** — são lidos com OCR em português na primeira leitura (alguns segundos por página). O texto lido por OCR pode ter erros, por isso as fontes que vêm de OCR aparecem assinaladas; digitalizações de má qualidade podem ficar sem texto, e a barra lateral avisa.
 - **Privacidade** — os trechos dos PDFs relevantes para cada pergunta são enviados para a Groq (serviço na cloud).
 - **A IA pode errar** — confirmar sempre na fonte indicada (botão *Ver no PDF*).
 

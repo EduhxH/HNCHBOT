@@ -1,6 +1,8 @@
+import os
 import re
 import unicodedata
-from collections import Counter
+from collections import Counter, defaultdict
+from pathlib import Path
 
 import pymupdf
 import pymupdf.layout  # noqa: F401  (ativa a análise de layout no pymupdf4llm)
@@ -9,41 +11,158 @@ import pymupdf4llm
 from .texto import normalizar, texto_simples
 
 PAGINAS_POR_LOTE = 10
+PASTA_TESSDATA = Path(__file__).resolve().parent.parent / "tessdata"
+IDIOMA_OCR = "por"
+DPI_OCR = 300
+QUALIDADE_MINIMA_OCR = 0.7
 _RE_PALAVRA = re.compile(r"[^\W\d_]+")
 _RE_INDICE = re.compile(r"\.{5,}\s*\d*\s*$")
 _RE_LISTA = re.compile(r"^\s*[-*]\s")
+_PONTUACAO = ".,;:!?()[]{}\"'«»“”‘’—–-·|/\\*+=_<>~^`"
+_PALAVRAS_CURTAS = {"a", "o", "e", "é", "à", "os", "as", "ao", "às", "da", "de", "do", "em", "na", "no", "um",
+                    "se", "ou", "já", "só", "há", "eu", "tu", "me", "te", "lá"}
+_VOGAIS = set("aeiouyáéíóúâêôãõàü")
+_PARA_LATIN1 = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'", "—": "-", "–": "-", "‑": "-", "…": "...",
+                              "•": "-", "€": "EUR"})
+
+
+def _tessdata() -> str | None:
+    for pasta in (PASTA_TESSDATA, os.getenv("TESSDATA_PREFIX")):
+        if pasta and (Path(pasta) / f"{IDIOMA_OCR}.traineddata").exists():
+            return str(pasta)
+    return None
+
+
+def _palavra_ocr(palavra: str) -> tuple[str, bool | None]:
+    p = palavra.strip(_PONTUACAO)
+    if not p:
+        return p, None
+    if re.fullmatch(r"\d+(?:[.,:/hº°-]\d+)*[%ºªh]?", p):
+        return p, True
+    if not re.fullmatch(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*", p) or not (p.islower() or p.isupper() or p.istitle()):
+        return p, False
+    return p, (len(p) >= 3 or p.lower() in _PALAVRAS_CURTAS) and any(c in _VOGAIS for c in p.lower())
+
+
+def _linha_ocr_valida(palavras: list[str]) -> bool | None:
+    avaliadas = [(p, valida) for p, valida in map(_palavra_ocr, palavras) if valida is not None]
+    conteudo = any(valida and (len(p) >= 3 or p[0].isdigit()) for p, valida in avaliadas)
+    if not avaliadas or not conteudo and all(valida for _, valida in avaliadas):
+        return None
+    return conteudo and sum(valida for _, valida in avaliadas) >= 0.75 * len(avaliadas)
+
+
+def _linhas_ocr(pagina, zona, tessdata: str) -> list[tuple]:
+    pixmap = pagina.get_pixmap(dpi=DPI_OCR, clip=zona)
+    lido = pymupdf.open("pdf", pixmap.pdfocr_tobytes(language=IDIOMA_OCR, tessdata=tessdata))
+    escala = lido[0].rect.torect(zona)
+    linhas = defaultdict(list)
+    for x0, y0, x1, y1, palavra, bloco, linha, _ in lido[0].get_text("words"):
+        linhas[bloco, linha].append((pymupdf.Rect(x0, y0, x1, y1) * escala, palavra))
+    validas = {chave: _linha_ocr_valida([p for _, p in palavras]) for chave, palavras in linhas.items()}
+    avaliadas = [v for v in validas.values() if v is not None]
+    if not avaliadas or sum(avaliadas) < QUALIDADE_MINIMA_OCR * len(avaliadas):
+        return []
+    resultado = []
+    for chave, palavras in linhas.items():
+        caixa = pymupdf.Rect(palavras[0][0])
+        for outra, _ in palavras[1:]:
+            caixa |= outra
+        texto = " ".join(palavra for _, palavra in palavras).translate(_PARA_LATIN1)
+        if validas[chave] is not False and any(c.isalnum() for c in texto) and not caixa.is_empty:
+            resultado.append((caixa, texto))
+    return resultado
+
+
+def _imagens_repetidas(doc) -> set[int]:
+    paginas = Counter()
+    for pagina in doc:
+        paginas.update({i["xref"] for i in pagina.get_image_info(xrefs=True)})
+    return {xref for xref, n in paginas.items() if xref and n >= max(3, doc.page_count / 2)}
+
+
+def _zonas_ocr(pagina, repetidas: set[int]) -> list:
+    imagens = [i for i in pagina.get_image_info(xrefs=True) if i["xref"] not in repetidas]
+    if not imagens:
+        return []
+    if len(pagina.get_text("words")) < 20:
+        return [pagina.rect]
+    zonas = []
+    for info in imagens:
+        zona = pymupdf.Rect(info["bbox"]) & pagina.rect
+        if zona.width < 24 or zona.height < 8:
+            continue
+        sobrepostas = [outra for outra in zonas if outra.intersects(zona)]
+        while sobrepostas:
+            for outra in sobrepostas:
+                zonas.remove(outra)
+                zona |= outra
+            sobrepostas = [outra for outra in zonas if outra.intersects(zona)]
+        zonas.append(zona)
+    return zonas
+
+
+def _copia_sem_texto(pagina):
+    copia = pymupdf.open()
+    copia.insert_pdf(pagina.parent, from_page=pagina.number, to_page=pagina.number)
+    sem_texto = copia[0]
+    sem_texto.add_redact_annot(sem_texto.rect)
+    sem_texto.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE, graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+                               text=pymupdf.PDF_REDACT_TEXT_REMOVE)
+    return copia
+
+
+def _ocr_pagina(pagina, tessdata: str, repetidas: set[int]) -> bool:
+    if pagina.rotation:
+        pagina.remove_rotation()
+    zonas = _zonas_ocr(pagina, repetidas)
+    if not zonas:
+        return False
+    copia = _copia_sem_texto(pagina)
+    linhas = [linha for zona in zonas for linha in _linhas_ocr(copia[0], zona, tessdata)]
+    for caixa, texto in linhas:
+        largura = pymupdf.get_text_length(texto, fontsize=caixa.height) or caixa.width
+        pagina.insert_text(caixa.bl, texto, fontsize=caixa.height, render_mode=3,
+                           morph=(caixa.bl, pymupdf.Matrix(caixa.width / largura, 1)))
+    return bool(linhas)
 
 
 def extrair_documento(caminho, progresso=None) -> dict:
+    tessdata = _tessdata()
     with pymupdf.open(caminho) as doc:
         if doc.needs_pass:
             raise ValueError("PDF protegido por palavra-passe")
         total = doc.page_count
-        paginas, avisos = [], []
+        titulo = (_titulo(doc[0]) if total else "") or doc.metadata.get("title") or ""
+        repetidas = _imagens_repetidas(doc) if tessdata else set()
+        paginas, avisos, paginas_ocr = [], [], set()
         for inicio in range(0, total, PAGINAS_POR_LOTE):
             if progresso:
                 progresso(inicio, total)
             lote = list(range(inicio, min(inicio + PAGINAS_POR_LOTE, total)))
-            for numero, parte in zip(lote, pymupdf4llm.to_markdown(doc, pages=lote, page_chunks=True)):
+            texto_nativo = {numero: doc[numero].get_text() for numero in lote}
+            if tessdata:
+                paginas_ocr |= {numero + 1 for numero in lote if _ocr_pagina(doc[numero], tessdata, repetidas)}
+            markdown_lote = pymupdf4llm.to_markdown(doc, pages=lote, page_chunks=True, use_ocr=False)
+            for numero, parte in zip(lote, markdown_lote):
                 pagina = doc[numero]
                 conhecidas = _palavras_da_pagina(pagina)
                 markdown = _separar_palavras_coladas(parte["text"], conhecidas)
                 markdown = _corrigir_tabelas(markdown, pagina, conhecidas)
                 markdown = _limpar_markdown(markdown)
-                em_falta = _palavras_em_falta(pagina, markdown)
+                em_falta = _palavras_em_falta(texto_nativo[numero], markdown)
                 if em_falta >= 5:
                     avisos.append(f"página {numero + 1}: {em_falta} palavras do PDF não foram lidas")
                 paginas.append(markdown)
         if progresso:
             progresso(total, total)
-        titulo = (_titulo(doc[0]) if total else "") or doc.metadata.get("title") or ""
 
     paginas = _sem_cabecalhos_rodapes(paginas)
     elementos = []
     for numero, markdown in enumerate(paginas, start=1):
         elementos += _elementos_da_pagina(numero, markdown)
-    return {"titulo": titulo, "num_paginas": total,
-            "elementos": _juntar_entre_paginas(elementos), "avisos": avisos}
+    return {"titulo": titulo, "num_paginas": total, "elementos": _juntar_entre_paginas(elementos),
+            "avisos": avisos, "paginas_ocr": sorted(paginas_ocr)}
 
 
 def _palavras_da_pagina(pagina) -> set[str]:
@@ -87,8 +206,8 @@ def _qualidade(texto: str, conhecidas: set[str]) -> float:
     return sum(p in conhecidas for p in palavras) / len(palavras) if palavras else 1.0
 
 
-def _palavras_em_falta(pagina, markdown: str) -> int:
-    no_pdf = Counter(p.lower() for p in _RE_PALAVRA.findall(pagina.get_text()) if len(p) >= 3)
+def _palavras_em_falta(texto_pdf: str, markdown: str) -> int:
+    no_pdf = Counter(p.lower() for p in _RE_PALAVRA.findall(texto_pdf) if len(p) >= 3)
     lidas = Counter(p.lower() for p in _RE_PALAVRA.findall(texto_simples(markdown)) if len(p) >= 3)
     return sum((no_pdf - lidas).values())
 
@@ -297,15 +416,17 @@ def _juntar_entre_paginas(elementos: list[dict]) -> list[dict]:
     return resultado
 
 
-def imagem_pagina(caminho, pagina: int, destacar: str = "", zoom: float = 1.6) -> bytes:
+def imagem_pagina(caminho, pagina: int, destacar: str = "", zoom: float = 1.6, ocr: bool = False) -> bytes:
     with pymupdf.open(caminho) as doc:
         pag = doc[pagina - 1]
+        tessdata = _tessdata() if ocr and destacar else None
+        camada = pag.get_textpage_ocr(language=IDIOMA_OCR, dpi=DPI_OCR, tessdata=tessdata) if tessdata else None
         for frase in re.split(r"(?<=[.!?;:])\s+|\n", texto_simples(destacar)):
             for pedaco in [frase] + sorted(frase.split("-"), key=len, reverse=True)[:2]:
                 pedaco = pedaco.strip()
                 if len(pedaco) < 20:
                     break
-                retangulos = pag.search_for(pedaco[:150])
+                retangulos = [r for r in pag.search_for(pedaco[:150], textpage=camada) if not r.is_empty]
                 for retangulo in retangulos:
                     pag.add_highlight_annot(retangulo)
                 if retangulos:

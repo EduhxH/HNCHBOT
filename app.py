@@ -28,8 +28,8 @@ def listar_modelos(chave: str) -> list[str]:
 
 
 @st.cache_data(show_spinner=False, max_entries=50)
-def desenhar_pagina(caminho: str, pagina: int, destacar: str) -> bytes:
-    return imagem_pagina(caminho, pagina, destacar)
+def desenhar_pagina(caminho: str, pagina: int, destacar: str, ocr: bool) -> bytes:
+    return imagem_pagina(caminho, pagina, destacar, ocr=ocr)
 
 
 def escapar(texto: str) -> str:
@@ -40,6 +40,17 @@ def _paginas(fonte: dict) -> str:
     if fonte["pagina"] == fonte["pagina_fim"]:
         return f"página {fonte['pagina']}"
     return f"páginas {fonte['pagina']}–{fonte['pagina_fim']}"
+
+
+def _lista_paginas(paginas: list[int]) -> str:
+    intervalos = []
+    for pagina in paginas:
+        if intervalos and pagina == intervalos[-1][1] + 1:
+            intervalos[-1][1] = pagina
+        else:
+            intervalos.append([pagina, pagina])
+    texto = ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in intervalos)
+    return f"página {texto}" if len(paginas) == 1 else f"páginas {texto}"
 
 
 @st.dialog("Página do PDF", width="large")
@@ -53,7 +64,7 @@ def ver_pagina(fonte: dict, indice: Indice):
         st.caption("O trecho usado na resposta está destacado a amarelo.")
     destacar = fonte["texto"] if fonte["tipo"] == "trecho" else ""
     for pagina in range(fonte["pagina"], min(fonte["pagina_fim"], fonte["pagina"] + 2) + 1):
-        st.image(desenhar_pagina(str(caminho), pagina, destacar), width="stretch",
+        st.image(desenhar_pagina(str(caminho), pagina, destacar, fonte.get("ocr", False)), width="stretch",
                  caption=f"Página {pagina}")
 
 
@@ -72,6 +83,8 @@ def mostrar_fontes(fontes: list[dict], chave: int, indice: Indice):
             st.markdown(f"**[{n}] {escapar(fonte['titulo_doc'])}** — {escapar(fonte['rotulo'])} · {_paginas(fonte)}")
             if fonte.get("caminho"):
                 st.caption(escapar(fonte["caminho"]))
+            if fonte.get("ocr"):
+                st.caption("Texto lido por OCR: pode ter erros de leitura, confirma no PDF.")
             texto = texto_simples(fonte["texto"])
             st.caption(escapar(texto if len(texto) <= 500 else texto[:500] + "…"))
             if st.button("Ver no PDF", key=f"ver-{chave}-{n}"):
@@ -108,9 +121,14 @@ with st.sidebar:
             if doc["erro"]:
                 st.error(f"**{nome}**: não foi possível ler ({doc['erro']})")
             elif caracteres < 30 * max(paginas, 1):
-                st.warning(f"**{nome}**: quase sem texto. Será um PDF digitalizado (imagem)? Precisa de OCR.")
+                st.warning(f"**{nome}**: quase sem texto, mesmo com OCR. A digitalização pode ter pouca qualidade."
+                           if doc.get("paginas_ocr") else
+                           f"**{nome}**: quase sem texto. Será um PDF digitalizado (imagem)? "
+                           "O OCR precisa do ficheiro tessdata/por.traineddata.")
             else:
                 st.markdown(f"- **{escapar(indice.titulo(nome))}** · {paginas} pág.  \n  `{nome}`")
+                if doc.get("paginas_ocr"):
+                    st.caption(f"Lido com OCR: {_lista_paginas(doc['paginas_ocr'])}. O texto pode ter erros.")
                 for aviso in doc.get("avisos", []):
                     st.caption(f"Aviso: {escapar(aviso)}")
 

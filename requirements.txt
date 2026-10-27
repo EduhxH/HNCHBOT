@@ -1,6 +1,6 @@
 streamlit>=1.50
 groq>=0.30
-pymupdf>=1.28
-pymupdf4llm>=1.28
-pymupdf-layout>=1.28
+pymupdf>=2.0
+pymupdf4llm>=2.0
+pymupdf-layout>=2.0
 python-dotenv>=1.0
