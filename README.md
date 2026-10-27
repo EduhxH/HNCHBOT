@@ -420,6 +420,8 @@ HNCHBOT/
 ├── iniciar.bat                 # Instala e abre o chatbot no Windows com duplo clique
 ├── requirements.txt            # Dependências Python
 ├── .env.example                # Modelo do ficheiro .env
+├── .streamlit/
+│   └── config.toml             # Arranque sem o pedido de email do Streamlit
 ├── assets/
 │   └── logo.svg                # Logótipo do Agrupamento de Escolas Henriques Nogueira
 ├── rag/
